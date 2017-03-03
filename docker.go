@@ -31,17 +31,17 @@ import (
 
 // Figure the API version supported by the server
 // by shelling out.
-func dockerDaemonAPIVersion() string {
+func dockerDaemonAPIVersion() (string, error) {
 	out, err := exec.Command(
 		"docker",
 		"version",
 		"--format",
 		"{{.Server.APIVersion}}").Output()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
 	api := strings.Trim(string(out[:]), "\n")
-	return api
+	return api, nil
 }
 
 // Connects to the local daemon using the right version of the API
@@ -49,7 +49,12 @@ func connectToDaemon() (*client.Client, error) {
 	// Set the exact version of the API in use, otherwise the library will
 	// try to use the latest one, which might be too newer compared to the
 	// one supported by the docker daemon
-	if err := os.Setenv("DOCKER_API_VERSION", dockerDaemonAPIVersion()); err != nil {
+
+	apiVersion, err := dockerDaemonAPIVersion()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Setenv("DOCKER_API_VERSION", apiVersion); err != nil {
 		return nil, err
 	}
 
