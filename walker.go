@@ -18,6 +18,7 @@
 package main
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,16 +29,18 @@ import (
 // It's possible to list only the files matching a given extension,
 // remember to add the "." (eg: ".mp3")
 type Walker struct {
-	Root      string
-	Extension string // only list files with this extension
-	Files     []string
+	Root        string
+	Extension   string // only list files with this extension
+	Files       []string
+	VerifyFiles bool
 }
 
 func NewWalker(path, extension string) *Walker {
 	return &Walker{
-		Files:     []string{},
-		Extension: extension,
-		Root:      path,
+		Files:       []string{},
+		Extension:   extension,
+		Root:        path,
+		VerifyFiles: true,
 	}
 }
 
@@ -55,6 +58,12 @@ func (w *Walker) Scan(path string, f os.FileInfo, err error) error {
 
 		if w.Extension != "" && strings.ToLower(w.Extension) != strings.ToLower(filepath.Ext(path)) {
 			add = false
+		} else if w.VerifyFiles {
+			var verifyErr error
+			add, verifyErr = Verify(path)
+			if verifyErr != nil {
+				log.Printf("Ignoring file %s because verification failed %v", path, verifyErr)
+			}
 		}
 
 		if add {
