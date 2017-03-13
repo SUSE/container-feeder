@@ -18,11 +18,12 @@
 package main
 
 import (
-	"context"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
+
+	"golang.org/x/net/context"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
