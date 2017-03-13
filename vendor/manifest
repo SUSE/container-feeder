@@ -226,6 +226,15 @@
 			"notests": true
 		},
 		{
+			"importpath": "golang.org/x/net/context",
+			"repository": "https://go.googlesource.com/net",
+			"vcs": "git",
+			"revision": "62685c2d7ca23c807425dca88b11a3e2323dab41",
+			"branch": "release-branch.go1.6",
+			"path": "/context",
+			"notests": true
+		},
+		{
 			"importpath": "golang.org/x/tools/cmd/goimports",
 			"repository": "https://go.googlesource.com/tools",
 			"vcs": "git",
