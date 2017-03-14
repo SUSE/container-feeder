@@ -18,6 +18,9 @@
 package main
 
 import (
+	"encoding/json"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"github.com/docker/docker/client"
@@ -34,6 +37,35 @@ type FailedImportError struct {
 type FeederLoadResponse struct {
 	SuccessfulImports []string
 	FailedImports     []FailedImportError
+}
+
+/* Image metadata type JSON schema:
+{
+  "image": {
+    "name": "",
+    "tags": [ ],
+    "file": ""
+  }
+}
+For example:
+{
+  "image": {
+    "name": "opensuse/salt-api",
+    "tags": [ "13", "13.0.1", "latest" ],
+    "file": "salt-api-2017.03-docker-images.x86_64.tar.xz"
+  }
+}
+*/
+// MetadataType struct to handle JSON schema
+type MetadataType struct {
+	Image ImageType
+}
+
+// ImageType struct to handle JSON schema
+type ImageType struct {
+	Name string   `json:"name"`
+	Tags []string `json:"tags"`
+	File string   `json:"file"`
 }
 
 // Returns a new Feeder instance. Takes care of
@@ -101,7 +133,7 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, error) {
 // Returns a map with the repotag string as key and the full path to the
 // file as value.
 func findRPMImages(path string) (map[string]string, error) {
-	walker := NewWalker(path, ".xz")
+	walker := NewWalker(path, ".metadata")
 	images := make(map[string]string)
 
 	if err := filepath.Walk(path, walker.Scan); err != nil {
@@ -109,8 +141,16 @@ func findRPMImages(path string) (map[string]string, error) {
 	}
 
 	for _, file := range walker.Files {
-		// TODO: extract the repotag from the file
-		images[repotagFromRPMFile(file)] = filepath.Join(path, file)
+		file_path := filepath.Join(path, file)
+		repotag, image, err := repotagFromRPMFile(file_path)
+		if err != nil {
+			return images, err
+		}
+		// Check if image exist on disk
+		image_path := filepath.Join(path, image)
+		if _, err := os.Stat(image_path); err == nil {
+			images[repotag] = image_path
+		}
 	}
 
 	return images, nil
@@ -118,7 +158,20 @@ func findRPMImages(path string) (map[string]string, error) {
 
 // Compute the repotag (`<name>:<tag>`) starting from the name of the tar.xz
 // file shipped by RPM
-func repotagFromRPMFile(file string) string {
-	// TODO: Implent code once the schema of the filename is defined
-	return file
+// Returns repotag (`<name>:<tag>`) and image name
+func repotagFromRPMFile(file string) (string, string, error) {
+	data, err := ioutil.ReadFile(file)
+	if err != nil {
+		return "", "", err
+	}
+
+	var metadata MetadataType
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", "", err
+	}
+
+	repotag := metadata.Image.Name + ":" + metadata.Image.Tags[0]
+	image := metadata.Image.File
+
+	return repotag, image, nil
 }
