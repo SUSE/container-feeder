@@ -64,7 +64,7 @@ Requires:       docker
 Find all docker images that are packaged in RPM and load all them in docker daemon.
 
 %prep
-%setup -q
+%setup -q -n ${NAME}-master
 
 %build
 %goprep %{import_path}
