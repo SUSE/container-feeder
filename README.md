@@ -1,3 +1,7 @@
+[![Build Status](https://travis-ci.org/kubic-project/container-feeder.png?branch=master)](https://travis-ci.org/kubic-project/container-feeder)
+
+# container-feeder
+
 This is a simple program that looks for all the Docker images shipped by RPMs,
 finds the ones that are not available to the Docker daemon running on the local
 machine and imports the missing ones.

@@ -1,0 +1,18 @@
+sudo: false
+
+language: go
+
+go:
+  - 1.7
+  - tip
+
+services:
+  - docker
+
+matrix:
+  allow_failures:
+    - go: tip
+
+script:
+  - test -z "$(gofmt -d .)"
+  - go test -v .
