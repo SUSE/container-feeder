@@ -99,7 +99,7 @@ func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 
 	b, err := ioutil.ReadAll(ret.Body)
 
-	return string(b[:]), nil
+	return string(b), nil
 }
 
 // Import the specified image into docker with repotag
@@ -137,5 +137,5 @@ func importDockerImage(cli *client.Client, pathToImage string, repoTag string) (
 
 	b, err := ioutil.ReadAll(ret)
 
-	return string(b[:]), nil
+	return string(b), nil
 }
