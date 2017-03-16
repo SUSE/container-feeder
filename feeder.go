@@ -92,7 +92,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 	}
 
 	for tag, file := range imagesToImport {
-		_, err := loadDockerImage(f.dockerClient, file)
+		_, err := importDockerImage(f.dockerClient, file, tag)
 		if err != nil {
 			res.FailedImports = append(
 				res.FailedImports,

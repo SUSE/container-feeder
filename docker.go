@@ -101,3 +101,41 @@ func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 
 	return string(b[:]), nil
 }
+
+// Import the specified image into docker with repotag
+// Returns the message produced by the docker daemon
+func importDockerImage(cli *client.Client, pathToImage string, repoTag string) (string, error) {
+	image, err := os.Open(pathToImage)
+	if err != nil {
+		return "", err
+	}
+	defer image.Close()
+
+	var tag string
+	repotag := strings.Split(repoTag, ":")
+	if len(repotag) == 2 {
+		tag = repotag[1]
+	} else {
+		tag = "latest"
+	}
+
+	// Docker client ImageImport requires as attributes
+	// ImageImportSource and ImageImportOptions structures
+	// They are defined in docker/api/types/client.go
+	// Type ImageImportSource struct has two fields
+	// Source is the data to send to the server to create image.
+	// SourceName is the name of the image to pull.
+	// Set to "-" to leverage the Source attribute
+	imageSrc := types.ImageImportSource{Source: image, SourceName: "-"}
+	imageOpt := types.ImageImportOptions{Tag: tag}
+
+	ret, err := cli.ImageImport(context.Background(), imageSrc, repotag[0], imageOpt)
+	if err != nil {
+		return "", err
+	}
+	defer ret.Close()
+
+	b, err := ioutil.ReadAll(ret)
+
+	return string(b[:]), nil
+}
