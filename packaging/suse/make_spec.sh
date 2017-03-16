@@ -12,8 +12,7 @@ cd $(dirname $0)
 
 YEAR=$(date +%Y)
 VERSION=$(cat ../../VERSION)
-COMMIT_UNIX_TIME=$(git show -s --format=%ct)
-VERSION="${VERSION%+*}+$(date -d @$COMMIT_UNIX_TIME +%Y%m%d).$(git rev-parse --short HEAD)"
+VERSION="${VERSION%+*}+git.$(git rev-parse --short HEAD)"
 NAME=$1
 
 cat <<EOF > ${NAME}.spec
@@ -48,7 +47,7 @@ License:        Apache-2.0
 Summary:        Automatically load all docker images that are packaged in RPM
 Url:            https://%{import_path}
 Group:          System/Management
-Source:         master.tar.gz
+Source:         %{name}-%{version}.tar.gz
 Source1:        sysconfig.%{name}
 Source2:        %{name}.service
 BuildRequires:  golang-packaging systemd
@@ -64,7 +63,7 @@ Requires:       docker
 Find all docker images that are packaged in RPM and load all them in docker daemon.
 
 %prep
-%setup -q -n ${NAME}-master
+%setup -q
 
 %build
 %goprep %{import_path}
