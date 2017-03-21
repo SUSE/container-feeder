@@ -54,6 +54,7 @@ Source2:        %{name}.service
 BuildRequires:  golang-packaging systemd
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 Requires:       docker
+Requires(post): %fillup_prereq
 
 %{?systemd_requires}
 
@@ -83,10 +84,10 @@ install -m 0755 ../go/bin/%{name} %{buildroot}/%{_bindir}
 
 %pre
 %service_add_pre %{name}.service
-%fillup_only -n %{name}
 
 %post
 %service_add_post %{name}.service
+%fillup_only -n %{name}
 
 %preun
 %service_del_preun %{name}.service
