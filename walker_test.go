@@ -34,13 +34,13 @@ func TestWalkerFailVerificationFileNotManagedByRPM(t *testing.T) {
 }
 
 func TestWalkerWithVerificationEnabled(t *testing.T) {
-	topDir := "/usr/lib64/coreutils"
+	topDir := "/usr/share/zoneinfo"
 
 	if _, err := os.Stat(topDir); os.IsNotExist(err) {
 		t.Skipf("skipped: %s does not exist", topDir)
 	}
 
-	walker := NewWalker(topDir, ".so")
+	walker := NewWalker(topDir, ".tab")
 	if err := filepath.Walk(topDir, walker.Scan); err != nil {
 		t.Errorf("walker error: %v", err)
 	}
