@@ -45,6 +45,11 @@ func TestWalkerWithVerificationEnabled(t *testing.T) {
 		t.Errorf("walker error: %v", err)
 	}
 
+	if _, err := os.Stat("/bin/rpm"); os.IsNotExist(err) {
+		t.Log("rpm binary not found in /bin/rpm, skipping test...")
+		return
+	}
+
 	if len(walker.Files) == 0 {
 		t.Error("Expected multiple matches")
 	}
