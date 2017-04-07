@@ -46,8 +46,7 @@ func TestWalkerWithVerificationEnabled(t *testing.T) {
 	}
 
 	if _, err := os.Stat("/bin/rpm"); os.IsNotExist(err) {
-		t.Log("rpm binary not found in /bin/rpm, skipping test...")
-		return
+		t.Skip("skipped: rpm binary not found in /bin/rpm")
 	}
 
 	if len(walker.Files) == 0 {
