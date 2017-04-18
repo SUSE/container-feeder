@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/docker/docker/client"
 )
 
@@ -84,8 +85,8 @@ func NewFeeder() (*Feeder, error) {
 // Imports all the RPMs images stored inside of `path` into
 // the local docker daemon
 func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
+	log.Debug("Importing images from %s", path)
 	res := FeederLoadResponse{}
-
 	imagesToImport, err := f.imagesToImport(path)
 	if err != nil {
 		return res, err
@@ -94,6 +95,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 	for tag, file := range imagesToImport {
 		_, err := loadDockerImage(f.dockerClient, file)
 		if err != nil {
+			log.Warn("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
 				res.FailedImports,
 				FailedImportError{
@@ -133,6 +135,7 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, error) {
 // Returns a map with the repotag string as key and the full path to the
 // file as value.
 func findRPMImages(path string) (map[string]string, error) {
+	log.Debug("Finding images from %s", path)
 	walker := NewWalker(path, ".metadata")
 	images := make(map[string]string)
 
@@ -150,6 +153,8 @@ func findRPMImages(path string) (map[string]string, error) {
 		image_path := filepath.Join(path, image)
 		if _, err := os.Stat(image_path); err == nil {
 			images[repotag] = image_path
+		} else {
+			log.Debug("Image %s does not exist", image_path)
 		}
 	}
 
