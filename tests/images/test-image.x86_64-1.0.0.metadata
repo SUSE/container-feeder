@@ -1,0 +1,6 @@
+{ "image": {
+    "name": "container-feeder/test-image",
+    "tags": [ "10.1", "latest" ],
+    "file": "test-image.x86_64-1.0.0.tar.xz"
+  }
+}
