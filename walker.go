@@ -18,10 +18,11 @@
 package main
 
 import (
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	log "github.com/Sirupsen/logrus"
 )
 
 // List the files inside of a directory.
@@ -62,7 +63,7 @@ func (w *Walker) Scan(path string, f os.FileInfo, err error) error {
 			var verifyErr error
 			add, verifyErr = Verify(path)
 			if verifyErr != nil {
-				log.Printf("Ignoring file %s because verification failed %v", path, verifyErr)
+				log.Warn("Ignoring file %s because verification failed %v", path, verifyErr)
 			}
 		}
 

@@ -15,5 +15,5 @@ matrix:
     - go: tip
 
 script:
-  - test -z "$(gofmt -d .)"
+  - test -z "$(gofmt -d *.go)"
   - go test -v .
