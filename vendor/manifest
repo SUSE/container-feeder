@@ -2,6 +2,14 @@
 	"version": 0,
 	"dependencies": [
 		{
+			"importpath": "github.com/Sirupsen/logrus",
+			"repository": "https://github.com/Sirupsen/logrus",
+			"vcs": "git",
+			"revision": "85b1699d505667d13f8ac4478c1debbf85d6c5de",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/docker/docker/api/types",
 			"repository": "https://github.com/docker/docker",
 			"vcs": "git",
@@ -218,6 +226,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/sirupsen/logrus",
+			"repository": "https://github.com/sirupsen/logrus",
+			"vcs": "git",
+			"revision": "85b1699d505667d13f8ac4478c1debbf85d6c5de",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/wadey/gocovmerge",
 			"repository": "https://github.com/wadey/gocovmerge",
 			"vcs": "git",
@@ -232,6 +248,15 @@
 			"revision": "62685c2d7ca23c807425dca88b11a3e2323dab41",
 			"branch": "release-branch.go1.6",
 			"path": "/context",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/sys/unix",
+			"repository": "https://go.googlesource.com/sys",
+			"vcs": "git",
+			"revision": "fb4cac33e3196ff7f507ab9b2d2a44b0142f5b5a",
+			"branch": "master",
+			"path": "/unix",
 			"notests": true
 		},
 		{
@@ -268,6 +293,22 @@
 			"revision": "219e654bb7266d3b73c4610ed24c33d12560826a",
 			"branch": "master",
 			"path": "imports",
+			"notests": true
+		},
+		{
+			"importpath": "gopkg.in/airbrake/gobrake.v2",
+			"repository": "https://gopkg.in/airbrake/gobrake.v2",
+			"vcs": "git",
+			"revision": "668876711219e8b0206e2994bf0a59d889c775aa",
+			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "gopkg.in/gemnasium/logrus-airbrake-hook.v2",
+			"repository": "https://gopkg.in/gemnasium/logrus-airbrake-hook.v2",
+			"vcs": "git",
+			"revision": "e928b033a891c0175fb643d5aa0779e86325eb12",
+			"branch": "master",
 			"notests": true
 		}
 	]
