@@ -3,7 +3,7 @@
 if [ -z "$1" ]; then
   cat <<EOF
 usage:
-  ./make_spec.sh PACKAGE
+  ./make_spec.sh PACKAGE [BRANCH]
 EOF
   exit 1
 fi
@@ -17,6 +17,8 @@ COMMIT=$(git rev-parse --short HEAD)
 COMMIT_UNIX_TIME=$(git show -s --format=%ct)
 VERSION="${VERSION%+*}+$(date -d @$COMMIT_UNIX_TIME +%Y%m%d).git_r${REVISION}_${COMMIT}"
 NAME=$1
+BRANCH=${2:-master}
+SAFE_BRANCH=${BRANCH//\//-}
 
 cat <<EOF > ${NAME}.spec
 #
@@ -50,7 +52,7 @@ License:        Apache-2.0
 Summary:        Automatically load all docker images that are packaged in RPM
 Url:            https://%{import_path}
 Group:          System/Management
-Source:         master.tar.gz
+Source:         ${SAFE_BRANCH}.tar.gz
 Source1:        sysconfig.%{name}
 Source2:        %{name}.service
 BuildRequires:  golang-packaging systemd
@@ -68,7 +70,7 @@ Requires(post): %fillup_prereq
 Find all docker images that are packaged in RPM and load all them in docker daemon.
 
 %prep
-%setup -q -n ${NAME}-master
+%setup -q -n ${NAME}-${SAFE_BRANCH}
 
 %build
 %goprep %{import_path}
