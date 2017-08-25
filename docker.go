@@ -111,8 +111,8 @@ func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 	if err := json.Unmarshal(b[:], &loadResponseBody); err != nil {
 		return "", err
 	}
-
-	return strings.TrimSpace(loadResponseBody.Stream)[14:], nil
+	return strings.TrimSpace(strings.TrimPrefix(
+		loadResponseBody.Stream, "Loaded image:")), nil
 }
 
 // Tags the specified docker image with the supplied tags
