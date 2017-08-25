@@ -123,6 +123,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 
 // Computes the RPMs images that have to be loaded into Docker
 // Returns a map with the repotag string as key and the name of the file as value
+//         and a map with additional repotags
 func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]string, error) {
 	rpmImages, rpmImageTags, err := findRPMImages(path)
 	if err != nil {
@@ -145,7 +146,7 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 
 // Finds all the Docker images shipped by RPMs
 // Returns a map with the repotag string as key and the full path to the
-// file as value.
+// file as value, and a map with additional repotags
 func findRPMImages(path string) (map[string]string, map[string][]string, error) {
 	log.Debug("Finding images from %s", path)
 	walker := NewWalker(path, ".metadata")
@@ -177,7 +178,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 
 // Compute the repotag (`<name>:<tag>`) starting from the name of the tar.xz
 // file shipped by RPM
-// Returns repotag (`<name>:<tag>`) and image name
+// Returns repotag (`<name>:<tag>`), a list of additional tags, and image name
 func repotagFromRPMFile(file string) (string, []string, string, error) {
 	data, err := ioutil.ReadFile(file)
 	if err != nil {
