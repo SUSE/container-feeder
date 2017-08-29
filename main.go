@@ -43,7 +43,7 @@ func main() {
 
 	importResp, err := feeder.Import(*dir)
 	if err != nil {
-		log.Error("Something went wrong while imporing the images: %v\n", err)
+		log.Errorf("Something went wrong while imporing the images: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -51,13 +51,13 @@ func main() {
 		log.Info("Successfully imported the following images:")
 	}
 	for _, image := range importResp.SuccessfulImports {
-		log.Info("  - %s\n", image)
+		log.Infof("  - %s", image)
 	}
 
 	if len(importResp.FailedImports) > 0 {
 		log.Error("The following images failed to be imported:")
 	}
 	for _, failedImport := range importResp.FailedImports {
-		log.Error("  - %s with error: %v\n", failedImport.Image, failedImport.Error)
+		log.Errorf("  - %s with error: %v", failedImport.Image, failedImport.Error)
 	}
 }
