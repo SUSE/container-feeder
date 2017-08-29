@@ -18,7 +18,6 @@
 package main
 
 import (
-	"encoding/json"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -84,10 +83,6 @@ func existingImages(cli *client.Client) ([]string, error) {
 	return tags, nil
 }
 
-type LoadResponseBody struct {
-	Stream string `json:"stream"`
-}
-
 // Loads the specified image into docker
 // Returns the image name loaded into the docker daemon
 func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
@@ -106,13 +101,8 @@ func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 
 	b, err := ioutil.ReadAll(ret.Body)
 
-	// {"stream":"Loaded image: sles12/mariadb:10.0\n"}
-	var loadResponseBody LoadResponseBody
-	if err := json.Unmarshal(b[:], &loadResponseBody); err != nil {
-		return "", err
-	}
 	return strings.TrimSpace(strings.TrimPrefix(
-		loadResponseBody.Stream, "Loaded image:")), nil
+		string(b[:]), "Loaded image:")), nil
 }
 
 // Tags the specified docker image with the supplied tags
