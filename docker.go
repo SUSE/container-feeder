@@ -27,6 +27,8 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
+
+	log "github.com/Sirupsen/logrus"
 )
 
 // Figure the API version supported by the server
@@ -82,7 +84,7 @@ func existingImages(cli *client.Client) ([]string, error) {
 }
 
 // Loads the specified image into docker
-// Returns the message produced by the docker daemon
+// Returns the image name loaded into the docker daemon
 func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 	image, err := os.Open(pathToImage)
 	if err != nil {
@@ -99,5 +101,20 @@ func loadDockerImage(cli *client.Client, pathToImage string) (string, error) {
 
 	b, err := ioutil.ReadAll(ret.Body)
 
-	return string(b[:]), nil
+	return strings.TrimSpace(strings.TrimPrefix(
+		string(b[:]), "Loaded image:")), nil
+}
+
+// Tags the specified docker image with the supplied tags
+func tagDockerImage(cli *client.Client, image string, tags []string) error {
+	for _, tag := range tags {
+		log.Debug("Tagging image: ", image, " with ", tag)
+
+		err := cli.ImageTag(context.Background(), image, tag)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
