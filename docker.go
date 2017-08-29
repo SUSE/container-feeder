@@ -110,9 +110,7 @@ func tagDockerImage(cli *client.Client, image string, tags []string) error {
 	for _, tag := range tags {
 		log.Debug("Tagging image: ", image, " with ", tag)
 
-		qualifiedTag := strings.Split(image, ":")[0] + ":" + tag
-
-		err := cli.ImageTag(context.Background(), image, qualifiedTag)
+		err := cli.ImageTag(context.Background(), image, tag)
 		if err != nil {
 			return err
 		}

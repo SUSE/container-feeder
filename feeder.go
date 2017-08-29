@@ -85,7 +85,7 @@ func NewFeeder() (*Feeder, error) {
 // Imports all the RPMs images stored inside of `path` into
 // the local docker daemon
 func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
-	log.Debug("Importing images from %s", path)
+	log.Debugf("Importing images from %s", path)
 	res := FeederLoadResponse{}
 	imagesToImport, imagesToImportTags, err := f.imagesToImport(path)
 	if err != nil {
@@ -95,7 +95,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 	for tag, file := range imagesToImport {
 		resp, err := loadDockerImage(f.dockerClient, file)
 		if err != nil {
-			log.Warn("Could not load image %s: %v", file, err)
+			log.Warnf("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
 				res.FailedImports,
 				FailedImportError{
@@ -105,7 +105,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 		} else {
 			err = tagDockerImage(f.dockerClient, resp, imagesToImportTags[tag])
 			if err != nil {
-				log.Warn("Could not tag image %s: %v", file, err)
+				log.Warnf("Could not tag image %s: %v", file, err)
 				res.FailedImports = append(
 					res.FailedImports,
 					FailedImportError{
@@ -119,6 +119,15 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 	}
 
 	return res, nil
+}
+
+func stringInSlice(a string, list []string) bool {
+	for _, b := range list {
+		if b == a {
+			return true
+		}
+	}
+	return false
 }
 
 // Computes the RPMs images that have to be loaded into Docker
@@ -135,10 +144,25 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 		return rpmImages, rpmImageTags, err
 	}
 
-	for _, dockerImage := range dockerImages {
-		// ignore the tags that are already known by docker
-		delete(rpmImages, dockerImage)
-		delete(rpmImageTags, dockerImage)
+	for rpmImage, _ := range rpmImages {
+		needsImport := false
+
+		if stringInSlice(rpmImage, dockerImages) == false {
+			needsImport = true
+		}
+
+		for _, additionalTag := range rpmImageTags[rpmImage] {
+			if stringInSlice(additionalTag, dockerImages) == false {
+				needsImport = true
+			}
+		}
+
+		if needsImport == false {
+			log.Info("Skipping import of ", rpmImage, " all tags exist")
+			// ignore the tags that are already known by docker
+			delete(rpmImages, rpmImage)
+			delete(rpmImageTags, rpmImage)
+		}
 	}
 
 	return rpmImages, rpmImageTags, nil
@@ -148,7 +172,7 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 // Returns a map with the repotag string as key and the full path to the
 // file as value, and a map with additional repotags
 func findRPMImages(path string) (map[string]string, map[string][]string, error) {
-	log.Debug("Finding images from %s", path)
+	log.Debugf("Finding images from %s", path)
 	walker := NewWalker(path, ".metadata")
 	images := make(map[string]string)
 	image_tags := make(map[string][]string)
@@ -169,7 +193,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 			images[repotag] = image_path
 			image_tags[repotag] = repotags
 		} else {
-			log.Debug("Image %s does not exist", image_path)
+			log.Debugf("Image %s does not exist", image_path)
 		}
 	}
 
@@ -193,5 +217,11 @@ func repotagFromRPMFile(file string) (string, []string, string, error) {
 	repotag := metadata.Image.Name + ":" + metadata.Image.Tags[0]
 	image := metadata.Image.File
 
-	return repotag, metadata.Image.Tags[1:], image, nil
+	repotags := make([]string, 0)
+
+	for _, tag := range metadata.Image.Tags[1:] {
+		repotags = append(repotags, metadata.Image.Name+":"+tag)
+	}
+
+	return repotag, repotags, image, nil
 }
