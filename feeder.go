@@ -93,7 +93,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 	}
 
 	for tag, file := range imagesToImport {
-		resp, err := loadDockerImage(f.dockerClient, file)
+		_, err := loadDockerImage(f.dockerClient, file)
 		if err != nil {
 			log.Warnf("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
@@ -103,7 +103,7 @@ func (f *Feeder) Import(path string) (FeederLoadResponse, error) {
 					Error: err,
 				})
 		} else {
-			err = tagDockerImage(f.dockerClient, resp, imagesToImportTags[tag])
+			err = tagDockerImage(f.dockerClient, tag, imagesToImportTags[tag])
 			if err != nil {
 				log.Warnf("Could not tag image %s: %v", file, err)
 				res.FailedImports = append(
