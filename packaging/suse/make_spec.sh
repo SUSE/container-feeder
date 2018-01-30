@@ -57,8 +57,7 @@ Source1:        sysconfig.%{name}
 Source2:        %{name}.service
 BuildRequires:  golang-packaging systemd
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
-Requires:       docker
-Conflicts:      docker > 1.12.6
+Requires:       docker-kubic
 Requires(post): %fillup_prereq
 
 %{?systemd_requires}
