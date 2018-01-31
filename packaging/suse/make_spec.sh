@@ -45,6 +45,11 @@ cat <<EOF > ${NAME}.spec
 %global provider_prefix %{provider}.%{provider_tld}/%{project}/%{repo}
 %global import_path     %{provider_prefix}
 
+#Compat macro for new _fillupdir macro introduced in Nov 2017
+%if ! %{defined _fillupdir}
+  %define _fillupdir /var/adm/fillup-templates
+%endif
+
 Name:           $NAME
 Version:        $VERSION
 Release:        0
@@ -76,8 +81,8 @@ Find all docker images that are packaged in RPM and load all them in docker daem
 %gobuild .
 
 %install
-mkdir -p %{buildroot}/%{_localstatedir}/adm/fillup-templates/
-install -D -m 0644 %{S:1} %{buildroot}/%{_localstatedir}/adm/fillup-templates/
+mkdir -p %{buildroot}/%{_fillupdir}
+install -D -m 0644 %{S:1} %{buildroot}/%{_fillupdir}
 
 mkdir -p %{buildroot}/%{_unitdir}
 install -D -m 0644 %{S:2} %{buildroot}/%{_unitdir}/
@@ -105,7 +110,7 @@ install -m 0755 ../go/bin/%{name} %{buildroot}/%{_bindir}
 %{_bindir}/%{name}
 %{_sbindir}/rc%{name}
 %{_unitdir}/%{name}.service
-%config %{_localstatedir}/adm/fillup-templates/sysconfig.%{name}
+%config %{_fillupdir}/sysconfig.%{name}
 
 
 %changelog
