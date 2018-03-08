@@ -8,12 +8,14 @@ IMPORT_PATH := github.com/kubic-project/container-feeder
 # Space separated patterns of packages to skip in list, test, format.
 IGNORED_PACKAGES := /vendor/
 
+TAGS := "containers_image_ostree_stub"
+
 .PHONY: all
 all: build
 
 .PHONY: build
 build: .GOPATH/.ok
-	$Q go install $(if $V,-v) $(VERSION_FLAGS) $(IMPORT_PATH)
+	$Q go install -tags $(TAGS) $(if $V,-v) $(VERSION_FLAGS) $(IMPORT_PATH)
 
 ### Code not in the repository root? Another binary? Add to the path like this.
 # .PHONY: otherbin
