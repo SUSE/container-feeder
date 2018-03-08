@@ -1,19 +1,27 @@
-sudo: false
+sudo: required
 
 language: go
 
 go:
-  - 1.6
-  - 1.7
-  - tip
+  - 1.8.x
+  - 1.9.x
 
-services:
-  - docker
+before_install:
+  - sudo apt-get -qq update
+  - sudo apt-get -qq install iptables libassuan-dev libc6-dev libgpgme11-dev
+  - sudo apt-get -qq install libgpg-error-dev libprotobuf-dev libprotobuf-c0-dev
+  - sudo apt-get -qq install libseccomp-dev libselinux1-dev pkg-config
+  - sudo apt-get -qq install libdevmapper-dev libglib2.0-dev git
+  - go get -u github.com/kardianos/govendor
 
 matrix:
   allow_failures:
     - go: tip
 
+env:
+  - BUILDTAGS="containers_image_ostree_stub exclude_graphdriver_btrfs libdm_no_deferred_remove"
+
 script:
-  - test -z "$(gofmt -d *.go)"
-  - go test -v .
+  - govendor fmt +local
+  - govendor test -tags "$BUILDTAGS" +local
+  - go build -tags "$BUILDTAGS" main.go

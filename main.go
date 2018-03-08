@@ -1,6 +1,6 @@
 /*
  * container-feeder: import Linux container images delivered as RPMs
- * Copyright 2017 SUSE LLC
+ * Copyright 2018 SUSE LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,27 +19,35 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
-	log "github.com/Sirupsen/logrus"
+	"github.com/kubic-project/container-feeder/feeder"
+	log "github.com/sirupsen/logrus"
 )
+
+// setLogLevel sets the logrus logging level
+func setLogLevel(logLevel string) {
+	if logLevel != "" {
+		lvl, err := log.ParseLevel(logLevel)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Unable to parse logging level: %s\n", logLevel)
+			os.Exit(1)
+		}
+		log.SetLevel(lvl)
+	} else {
+		log.SetLevel(log.InfoLevel)
+	}
+}
 
 func main() {
 	const defaultImageLocation string = "/usr/share/suse-docker-images/native"
 
-	var dir = flag.String("dir", defaultImageLocation, "directory containing the images to import")
+	var dir = flag.String("dir", defaultImageLocation, "Import container images from this directory")
+	var logLevel = flag.String("log-level", "info", "Set the logging level (\"debug\"|\"info\"|\"warn\"|\"error\"|\"fatal\")")
 	flag.Parse()
 
-	if *dir == "" {
-		log.Error("missing mandatory `--dir` value")
-		os.Exit(1)
-	}
-
-	feeder, err := NewFeeder()
-	if err != nil {
-		log.Printf("Something went wrong while initializing the image feeder: %v\n", err)
-		os.Exit(1)
-	}
+	setLogLevel(*logLevel)
 
 	importResp, err := feeder.Import(*dir)
 	if err != nil {
