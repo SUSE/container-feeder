@@ -54,42 +54,52 @@ Name:           $NAME
 Version:        $VERSION
 Release:        0
 License:        Apache-2.0
-Summary:        Automatically load all docker images that are packaged in RPM
-Url:            https://%{import_path}
+Summary:        Load container images from RPMs into different container engines
+Url:            https://github.com/kubic-project/container-feeder
 Group:          System/Management
 Source:         ${SAFE_BRANCH}.tar.gz
 Source1:        sysconfig.%{name}
 Source2:        %{name}.service
-BuildRequires:  golang-packaging systemd
+Source3:        %{name}-rpmlintrc
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
+BuildRequires:  device-mapper-devel
+BuildRequires:  fdupes
+BuildRequires:  glib2-devel-static
+BuildRequires:  glibc-devel-static
+BuildRequires:  go-go-md2man
+BuildRequires:  golang-packaging
+BuildRequires:  libapparmor-devel
+BuildRequires:  libassuan-devel
+BuildRequires:  libbtrfs-devel
+BuildRequires:  libgpgme-devel
+BuildRequires:  libseccomp-devel
+BuildRequires:  golang(API) >= 1.7
 Requires:       docker-kubic
+Requires:       libcontainers-common
+Requires:       libcontainers-image
+Requires:       libcontainers-storage
 Requires(post): %fillup_prereq
-
 %{?systemd_requires}
-
 %{go_nostrip}
 %{go_provides}
 
 %description
-Find all docker images that are packaged in RPM and load all them in docker daemon.
+Load container images in the Docker archive format, installed by RPMs, into
+different container engines, such as docker or crio (containers/storage).
 
 %prep
 %setup -q -n ${NAME}-${SAFE_BRANCH}
 
 %build
-%goprep %{import_path}
-%gobuild .
+export GOPATH=\$HOME/go
+mkdir -p \$HOME/go/src/%{import_path}
+rm -rf \$HOME/go/src/%{import_path}/*
+cp -ar * \$HOME/go/src/%{import_path}
+cd \$HOME/go/src/%{import_path}
 
-%install
-mkdir -p %{buildroot}/%{_fillupdir}
-install -D -m 0644 %{S:1} %{buildroot}/%{_fillupdir}
-
-mkdir -p %{buildroot}/%{_unitdir}
-install -D -m 0644 %{S:2} %{buildroot}/%{_unitdir}/
-mkdir -p %{buildroot}/%{_sbindir}
-ln -s %{_sbindir}/service %{buildroot}/%{_sbindir}/rc%{name}
-
-install -m 0755 ../go/bin/%{name} %{buildroot}/%{_bindir}
+go build -tags "containers_image_ostree_stub seccomp apparmor" \
+         -o bin/container-feeder \
+         main.go
 
 %pre
 %service_add_pre %{name}.service
@@ -104,14 +114,28 @@ install -m 0755 ../go/bin/%{name} %{buildroot}/%{_bindir}
 %postun
 %service_del_postun %{name}.service
 
+%install
+cd \$HOME/go/src/%{import_path}
+install -D -m 0755 bin/%{name} %{buildroot}/%{_bindir}/%{name}
+install -D -m 0644 container-feeder.json %{buildroot}/%{_sysconfdir}/container-feeder.json
+
+mkdir -p %{buildroot}/%{_fillupdir}
+install -D -m 0644 %{SOURCE1} %{buildroot}/%{_fillupdir}
+
+mkdir -p %{buildroot}/%{_unitdir}
+install -D -m 0644 %{SOURCE2} %{buildroot}/%{_unitdir}/
+mkdir -p %{buildroot}/%{_sbindir}
+ln -s %{_sbindir}/service %{buildroot}/%{_sbindir}/rc%{name}
+
+%fdupes %{buildroot}/%{_prefix}
+
 %files
-%defattr(-,root,root)
 %doc README.md LICENSE
 %{_bindir}/%{name}
 %{_sbindir}/rc%{name}
 %{_unitdir}/%{name}.service
-%config %{_fillupdir}/sysconfig.%{name}
-
+%{_fillupdir}/sysconfig.%{name}
+%config(noreplace) %{_sysconfdir}/container-feeder.json
 
 %changelog
 EOF
