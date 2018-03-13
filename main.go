@@ -51,7 +51,7 @@ func main() {
 
 	importResp, err := feeder.Import(*dir)
 	if err != nil {
-		log.Errorf("Something went wrong while imporing the images: %v\n", err)
+		log.Errorf("Something went wrong while importing the images: %v\n", err)
 		os.Exit(1)
 	}
 

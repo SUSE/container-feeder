@@ -38,7 +38,7 @@ type CRIOFeeder struct {
 }
 
 // NewCRIOFeeder returns a pointer to an initialized CRIOFeeder.
-func NewCRIOFeeder() (*CRIOFeeder, error) {
+func NewCRIOFeeder(config FeederConfig) (*CRIOFeeder, error) {
 	feeder := &CRIOFeeder{}
 
 	if reexec.Init() {
@@ -46,7 +46,11 @@ func NewCRIOFeeder() (*CRIOFeeder, error) {
 	}
 
 	options := []libpod.RuntimeOption{}
-	storageOpts := storage.DefaultStoreOptions
+	storageOpts := storage.StoreOptions{
+		RunRoot:         config.CrioStorage.RunRoot,
+		GraphRoot:       config.CrioStorage.GraphRoot,
+		GraphDriverName: config.CrioStorage.Driver,
+	}
 	options = append(options, libpod.WithStorageConfig(storageOpts))
 
 	runtime, err := libpod.NewRuntime(options...)

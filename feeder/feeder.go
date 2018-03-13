@@ -31,9 +31,16 @@ import (
 // the default path of container-feeder.json config
 var configFile = "/etc/container-feeder.json"
 
+type FeederCrioStorageConfig struct {
+	RunRoot   string `json:"run-root,omitempty"`
+	GraphRoot string `json:"graph-root,omitempty"`
+	Driver    string `json:"driver,omitempty"`
+}
+
 // special type to load the container-feeder.json config
 type FeederConfig struct {
-	Target string `json:"feeder-target,omitempty"`
+	Target      string                  `json:"feeder-target,omitempty"`
+	CrioStorage FeederCrioStorageConfig `json:"crio-storage,omitempty"`
 }
 
 // loadConfig loads and returns the container-feeder.json config
@@ -47,6 +54,23 @@ func loadConfig() (FeederConfig, error) {
 
 	if err := json.Unmarshal(file, &config); err != nil {
 		return config, err
+	}
+
+	if config.Target == "crio" {
+		if config.CrioStorage.Driver == "" {
+			return FeederConfig{},
+				fmt.Errorf("You must specify a Driver to be used by crio")
+		}
+
+		if config.CrioStorage.RunRoot == "" {
+			return FeederConfig{},
+				fmt.Errorf("You must specify a RunRoo to be used by crio")
+		}
+
+		if config.CrioStorage.GraphRoot == "" {
+			return FeederConfig{},
+				fmt.Errorf("You must specify a GraphRoot to be used by crio")
+		}
 	}
 
 	return config, nil
@@ -113,8 +137,7 @@ func stringInSlice(a string, list []string) bool {
 func NewFeeder() (Feeder, error) {
 	config, err := loadConfig()
 	if err != nil {
-		log.Errorf("Error loading config file, defaulting to docker feeder: %v", err)
-		config.Target = "docker"
+		return nil, err
 	}
 	switch config.Target {
 	case "docker":
@@ -122,7 +145,7 @@ func NewFeeder() (Feeder, error) {
 		return NewDockerFeeder()
 	case "crio":
 		log.Debugf("Feeder target '%s': using CRIOFeeder", config.Target)
-		return NewCRIOFeeder()
+		return NewCRIOFeeder(config)
 	default:
 		log.Debugf("Feeder target unspecified: defaulting to DockerFeeder")
 		return NewDockerFeeder()

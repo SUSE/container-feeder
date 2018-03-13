@@ -1,3 +1,8 @@
 {
-	"feeder-target": "docker"
+  "feeder-target": "docker",
+  "crio-storage" : {
+    "run-root": "/var/lib/containers/storage",
+    "graph-root": "/var/lib/containers/storage",
+    "driver": "btrfs"
+  }
 }
