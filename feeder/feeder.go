@@ -113,8 +113,7 @@ func stringInSlice(a string, list []string) bool {
 func NewFeeder() (Feeder, error) {
 	config, err := loadConfig()
 	if err != nil {
-		log.Errorf("Error loading config file, defaulting to docker feeder: %v", err)
-		config.Target = "docker"
+		return nil, err
 	}
 	switch config.Target {
 	case "docker":
