@@ -187,6 +187,12 @@ func imagesToImport(f Feeder, path string) (map[string]string, map[string][]stri
 	if err != nil {
 		return rpmImages, rpmImageTags, err
 	}
+	if len(images) > 0 {
+		log.Debugf("Found the following images in the local storage:")
+	}
+	for _, img := range images {
+		log.Debugf("%s", img)
+	}
 
 	for rpmImage, _ := range rpmImages {
 		needsImport := false

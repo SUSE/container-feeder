@@ -1341,10 +1341,10 @@
 			"revisionTime": "2018-03-05T22:00:56Z"
 		},
 		{
-			"checksumSHA1": "p4qFTjWfDdOKeUD4WQjCmsJflC8=",
+			"checksumSHA1": "MRzFuQzQEgYT4kANlBdeWDrhhOQ=",
 			"path": "github.com/projectatomic/libpod/libpod",
-			"revision": "04d56c9fe30235c9f99cf816fc6078fa5b2f1512",
-			"revisionTime": "2018-03-07T15:14:17Z"
+			"revision": "ff091cf731cb28e5d38ff843781115d352ea1530",
+			"revisionTime": "2018-03-14T20:17:05Z"
 		},
 		{
 			"checksumSHA1": "2lBg1TGAyyos/MUaiSxw5NtfeP0=",
@@ -1387,6 +1387,12 @@
 			"path": "github.com/projectatomic/libpod/pkg/registrar",
 			"revision": "04d56c9fe30235c9f99cf816fc6078fa5b2f1512",
 			"revisionTime": "2018-03-07T15:14:17Z"
+		},
+		{
+			"checksumSHA1": "FYWEWot6yKLl1G5zo7FKbHEI+uY=",
+			"path": "github.com/projectatomic/libpod/pkg/util",
+			"revision": "ff091cf731cb28e5d38ff843781115d352ea1530",
+			"revisionTime": "2018-03-14T20:17:05Z"
 		},
 		{
 			"checksumSHA1": "i/W3RTmjLPqd2rEGqDxJyNKZU6I=",
