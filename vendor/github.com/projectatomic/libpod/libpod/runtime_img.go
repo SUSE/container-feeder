@@ -29,6 +29,7 @@ import (
 	"github.com/projectatomic/libpod/libpod/common"
 	"github.com/projectatomic/libpod/libpod/driver"
 	"github.com/projectatomic/libpod/pkg/inspect"
+	"github.com/projectatomic/libpod/pkg/util"
 )
 
 // Runtime API
@@ -312,7 +313,7 @@ func (k *Image) Decompose() error {
 		if err != nil {
 			return nil
 		}
-		if StringInSlice(k.Registry, registries) {
+		if util.StringInSlice(k.Registry, registries) {
 			return nil
 		}
 		// We need to check if the registry name is legit
@@ -608,7 +609,7 @@ func (r *Runtime) getPullListFromRef(srcRef types.ImageReference, imgName string
 	if srcRef.Transport().Name() == DockerArchive {
 		tarSource, err := tarfile.NewSourceFromFile(archFile)
 		if err != nil {
-			return nil, errors.Errorf("error reading tar file: %v", err)
+			return nil, err
 		}
 		manifest, err := tarSource.LoadTarManifest()
 		if err != nil {
@@ -887,9 +888,11 @@ func (r *Runtime) RemoveImage(image *storage.Image, force bool) (string, error) 
 	if len(image.Names) > 1 && !force {
 		return "", fmt.Errorf("unable to delete %s (must force) - image is referred to in multiple tags", image.ID)
 	}
-	// If it is forced, we have to untag the image so that it can be deleted
-	image.Names = image.Names[:0]
 
+	// If it is forced, we have to untag the image so that it can be deleted
+	if err = r.store.SetNames(image.ID, image.Names[:0]); err != nil {
+		return "", err
+	}
 	_, err = r.store.DeleteImage(image.ID, true)
 	if err != nil {
 		return "", err
@@ -1296,9 +1299,11 @@ func imageSize(img types.ImageSource) *uint64 {
 	return nil
 }
 
-func reposToMap(repotags []string) map[string]string {
+// ReposToMap parses the specified repotags and returns a map with repositories
+// as keys and the corresponding arrays of tags as values.
+func ReposToMap(repotags []string) map[string][]string {
 	// map format is repo -> tag
-	repos := make(map[string]string)
+	repos := make(map[string][]string)
 	for _, repo := range repotags {
 		var repository, tag string
 		if len(repo) > 0 {
@@ -1306,10 +1311,10 @@ func reposToMap(repotags []string) map[string]string {
 			repository = repo[0:li]
 			tag = repo[li+1:]
 		}
-		repos[repository] = tag
+		repos[repository] = append(repos[repository], tag)
 	}
 	if len(repos) == 0 {
-		repos["<none>"] = "<none"
+		repos["<none>"] = []string{"<none>"}
 	}
 	return repos
 }
@@ -1346,18 +1351,20 @@ func (r *Runtime) GetImageResults() ([]inspect.ImageResult, error) {
 			dangling = true
 		}
 
-		for repo, tag := range reposToMap(image.Names) {
+		for repo, tags := range ReposToMap(image.Names) {
+			// use the first pair as the image's default repo and tag
 			results = append(results, inspect.ImageResult{
 				ID:         image.ID,
 				Repository: repo,
 				RepoTags:   image.Names,
-				Tag:        tag,
+				Tag:        tags[0],
 				Size:       imageSize(img),
 				Digest:     image.Digest,
 				Created:    image.Created,
 				Labels:     imgInspect.Labels,
 				Dangling:   dangling,
 			})
+			break
 		}
 
 	}

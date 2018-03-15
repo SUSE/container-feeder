@@ -1,17 +1,13 @@
 package libpod
 
 import (
-	"encoding/json"
 	"io/ioutil"
 	"os"
-	gosignal "os/signal"
-	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/containers/storage"
 	"github.com/docker/docker/daemon/caps"
-	"github.com/docker/docker/pkg/signal"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/term"
 	"github.com/pkg/errors"
@@ -63,73 +59,11 @@ func (c *Container) Init() (err error) {
 		}
 	}()
 
-	// If the OCI spec already exists, we need to replace it
-	// Cannot guarantee some things, e.g. network namespaces, have the same
-	// paths
-	jsonPath := filepath.Join(c.bundlePath(), "config.json")
-	if _, err := os.Stat(jsonPath); err != nil {
-		if !os.IsNotExist(err) {
-			return errors.Wrapf(err, "error doing stat on container %s spec", c.ID())
-		}
-		// The spec does not exist, we're fine
-	} else {
-		// The spec exists, need to remove it
-		if err := os.Remove(jsonPath); err != nil {
-			return errors.Wrapf(err, "error replacing runtime spec for container %s", c.ID())
-		}
-	}
-
-	// Copy /etc/resolv.conf to the container's rundir
-	runDirResolv, err := c.generateResolvConf()
-	if err != nil {
-		return err
-	}
-
-	// Copy /etc/hosts to the container's rundir
-	runDirHosts, err := c.generateHosts()
-	if err != nil {
-		return errors.Wrapf(err, "unable to copy /etc/hosts to container space")
-	}
-
-	runDirHostname, err := c.generateEtcHostname(c.Hostname())
-	if err != nil {
-		return errors.Wrapf(err, "unable to generate hostname file for container")
-	}
-
-	// Generate the OCI spec
-	spec, err := c.generateSpec(runDirResolv, runDirHosts, runDirHostname)
-	if err != nil {
-		return err
-	}
-	c.runningSpec = spec
-
-	// Save the OCI spec to disk
-	fileJSON, err := json.Marshal(c.runningSpec)
-	if err != nil {
-		return errors.Wrapf(err, "error exporting runtime spec for container %s to JSON", c.ID())
-	}
-	if err := ioutil.WriteFile(jsonPath, fileJSON, 0644); err != nil {
-		return errors.Wrapf(err, "error writing runtime spec JSON to file for container %s", c.ID())
-	}
-
-	logrus.Debugf("Created OCI spec for container %s at %s", c.ID(), jsonPath)
-
-	c.state.ConfigPath = jsonPath
-
-	// With the spec complete, do an OCI create
-	if err := c.runtime.ociRuntime.createContainer(c, c.config.CgroupParent); err != nil {
-		return err
-	}
-
-	logrus.Debugf("Created container %s in OCI runtime", c.ID())
-
-	c.state.State = ContainerStateCreated
-
-	return c.save()
+	return c.init()
 }
 
 // Start starts a container
-func (c *Container) Start() error {
+func (c *Container) Start() (err error) {
 	if !c.locked {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -149,20 +83,33 @@ func (c *Container) Start() error {
 		return errors.Wrapf(ErrNotImplemented, "restarting a stopped container is not yet supported")
 	}
 
-	// Mount storage for the container
+	// Mount storage for the container if necessary
 	if err := c.mountStorage(); err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			if err2 := c.cleanupStorage(); err2 != nil {
+				logrus.Errorf("Error cleaning up storage for container %s: %v", c.ID(), err2)
+			}
+		}
+	}()
 
-	if err := c.runtime.ociRuntime.startContainer(c); err != nil {
-		return err
+	// Create a network namespace if necessary
+	if c.config.CreateNetNS && c.state.NetNS == nil {
+		if err := c.runtime.createNetNS(c); err != nil {
+			return err
+		}
 	}
+	defer func() {
+		if err != nil {
+			if err2 := c.runtime.teardownNetNS(c); err2 != nil {
+				logrus.Errorf("Error tearing down network namespace for container %s: %v", c.ID(), err2)
+			}
+		}
+	}()
 
-	logrus.Debugf("Started container %s", c.ID())
-
-	c.state.State = ContainerStateRunning
-
-	return c.save()
+	return c.start()
 }
 
 // Stop uses the container's stop signal (or SIGTERM if no signal was specified)
@@ -180,6 +127,12 @@ func (c *Container) Stop() error {
 		}
 	}
 
+	if c.state.State == ContainerStateConfigured ||
+		c.state.State == ContainerStateUnknown ||
+		c.state.State == ContainerStatePaused {
+		return errors.Wrapf(ErrCtrStateInvalid, "can only stop created, running, or stopped containers")
+	}
+
 	return c.stop(c.config.StopTimeout)
 }
 
@@ -194,6 +147,12 @@ func (c *Container) StopWithTimeout(timeout uint) error {
 		if err := c.syncContainer(); err != nil {
 			return err
 		}
+	}
+
+	if c.state.State == ContainerStateConfigured ||
+		c.state.State == ContainerStateUnknown ||
+		c.state.State == ContainerStatePaused {
+		return errors.Wrapf(ErrCtrStateInvalid, "can only stop created, running, or stopped containers")
 	}
 
 	return c.stop(timeout)
@@ -347,31 +306,6 @@ func (c *Container) Exec(tty, privileged bool, env, cmd []string, user string) e
 	}
 
 	return waitErr
-}
-
-func resizeTty(resize chan remotecommand.TerminalSize) {
-	sigchan := make(chan os.Signal, 1)
-	gosignal.Notify(sigchan, signal.SIGWINCH)
-	sendUpdate := func() {
-		winsize, err := term.GetWinsize(os.Stdin.Fd())
-		if err != nil {
-			logrus.Warnf("Could not get terminal size %v", err)
-			return
-		}
-		resize <- remotecommand.TerminalSize{
-			Width:  winsize.Width,
-			Height: winsize.Height,
-		}
-	}
-	go func() {
-		defer close(resize)
-		// Update the terminal size immediately without waiting
-		// for a SIGWINCH to get the correct initial size.
-		sendUpdate()
-		for range sigchan {
-			sendUpdate()
-		}
-	}()
 }
 
 // Attach attaches to a container
