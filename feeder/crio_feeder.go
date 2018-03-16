@@ -27,7 +27,6 @@ import (
 	"github.com/containers/storage"
 	"github.com/containers/storage/pkg/reexec"
 	"github.com/projectatomic/libpod/libpod"
-	"github.com/ulikunitz/xz"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -75,18 +74,9 @@ func (f *CRIOFeeder) Images() ([]string, error) {
 }
 
 // decompressXZImage decompresses the specified tar.xz into a tar image that is
-// located in /var/tmp (writable of MicroOS).
+// located in /var/tmp (writable on MicroOS).
 func decompressXZImage(image string) (string, error) {
 	log.Debugf("Decompressing image %s", image)
-	buf, err := os.Open(image)
-	if err != nil {
-		return "", fmt.Errorf("error decompressing image: %v", err)
-	}
-
-	xzReader, err := xz.NewReader(buf)
-	if err != nil {
-		return "", fmt.Errorf("error decompressing image: %v", err)
-	}
 
 	tmpFile, err := ioutil.TempFile("/var/tmp", "container-feeder")
 	if err != nil {
@@ -94,8 +84,9 @@ func decompressXZImage(image string) (string, error) {
 	}
 	defer tmpFile.Close()
 
-	if _, err := io.Copy(tmpFile, xzReader); err != nil {
-		return "", fmt.Errorf("error writing to temporary file: %v", err)
+	cmd := []string{"/usr/bin/unxz", "-c", image}
+	if err := runCommand(cmd, "", tmpFile); err != nil {
+		return "", fmt.Errorf("error using xz: %v", err)
 	}
 
 	return tmpFile.Name(), nil

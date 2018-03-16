@@ -78,6 +78,7 @@ Requires:       docker-kubic
 Requires:       libcontainers-common
 Requires:       libcontainers-image
 Requires:       libcontainers-storage
+Requires:       xz
 Requires(post): %fillup_prereq
 %{?systemd_requires}
 %{go_nostrip}

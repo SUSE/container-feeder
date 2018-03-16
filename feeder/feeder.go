@@ -18,10 +18,12 @@
 package feeder
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/containers/image/docker/reference"
@@ -359,4 +361,25 @@ func repotagFromRPMFile(file string) (string, []string, string, error) {
 	}
 
 	return repotag, repotags, image, nil
+}
+
+// runCommand executes the program specified in args with env and writes to
+// stdout.
+func runCommand(args []string, env string, stdout *os.File) error {
+	var cmd *exec.Cmd
+	var serr bytes.Buffer
+
+	log.Debugf("runCommand(args=%s, env=%s)", args, env)
+
+	cmd = exec.Command(args[0], args[1:]...)
+	cmd.Stdout = stdout
+	cmd.Stderr = &serr
+	cmd.Env = []string{env}
+
+	err := cmd.Run()
+	if err != nil {
+		log.Debugf("Error executing command: %s", serr.String())
+		return fmt.Errorf("error running command: %s", err.Error())
+	}
+	return nil
 }
