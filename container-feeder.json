@@ -1,3 +1,4 @@
 {
-	"feeder-target": "docker"
+	"feeder-target": "docker",
+	"whitelist": []
 }
