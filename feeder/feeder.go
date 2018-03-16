@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/containers/image/docker/reference"
+
 	wlk "github.com/kubic-project/container-feeder/walker"
 	log "github.com/sirupsen/logrus"
 )
@@ -33,7 +35,24 @@ var configFile = "/etc/container-feeder.json"
 
 // special type to load the container-feeder.json config
 type FeederConfig struct {
-	Target string `json:"feeder-target,omitempty"`
+	Target    string   `json:"feeder-target,omitempty"`
+	Whitelist []string `json:"whitelist,omitempty"`
+}
+
+// parseWhitelist returns a whitelist with normalized elements.
+func parseWhitelist(whitelist []string) ([]string, error) {
+	list := []string{}
+	for _, w := range whitelist {
+		name, tag, err := normalizeNameTag(w)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing whitelist item '%s': %v", w, err)
+		}
+		if tag != "" {
+			return nil, fmt.Errorf("whitelisting does not support tags: %s", w)
+		}
+		list = append(list, name)
+	}
+	return list, nil
 }
 
 // loadConfig loads and returns the container-feeder.json config
@@ -48,6 +67,12 @@ func loadConfig() (FeederConfig, error) {
 	if err := json.Unmarshal(file, &config); err != nil {
 		return config, err
 	}
+
+	whitelist, err := parseWhitelist(config.Whitelist)
+	if err != nil {
+		return config, err
+	}
+	config.Whitelist = whitelist
 
 	return config, nil
 }
@@ -91,11 +116,18 @@ type ImageType struct {
 	File string   `json:"file"`
 }
 
-// Feeder is a generalized interface that Container Feeders must implement
-type Feeder interface {
+// FeederIface is a generalized interface that Container Feeders must implement
+type FeederIface interface {
 	Images() ([]string, error)
 	LoadImage(string) (string, error)
 	TagImage(string, []string) error
+}
+
+// Feeder includes a concrete object implementing the FeederIface and
+// FeederConfig
+type Feeder struct {
+	feeder FeederIface
+	config FeederConfig
 }
 
 // stringInSlice returns true if a is in list.
@@ -110,22 +142,28 @@ func stringInSlice(a string, list []string) bool {
 
 // NewFeeder returns a new Container Feeder based on the specified type in
 // the container-feeder.json config (default: DockerFeeder)
-func NewFeeder() (Feeder, error) {
-	config, err := loadConfig()
+func NewFeeder() (*Feeder, error) {
+	var err error
+	f := Feeder{}
+
+	f.config, err = loadConfig()
 	if err != nil {
 		return nil, err
 	}
-	switch config.Target {
+
+	switch f.config.Target {
 	case "docker":
-		log.Debugf("Feeder target '%s': using DockerFeeder", config.Target)
-		return NewDockerFeeder()
+		log.Debugf("Feeder target '%s': using DockerFeeder", f.config.Target)
+		f.feeder, err = NewDockerFeeder()
 	case "crio":
-		log.Debugf("Feeder target '%s': using CRIOFeeder", config.Target)
-		return NewCRIOFeeder()
+		log.Debugf("Feeder target '%s': using CRIOFeeder", f.config.Target)
+		f.feeder, err = NewCRIOFeeder()
 	default:
 		log.Debugf("Feeder target unspecified: defaulting to DockerFeeder")
-		return NewDockerFeeder()
+		f.feeder, err = NewDockerFeeder()
 	}
+
+	return &f, err
 }
 
 // Imports all the RPMs images stored inside of `path` into
@@ -139,14 +177,14 @@ func Import(path string) (FeederLoadResponse, error) {
 	}
 
 	log.Debugf("Trying to import images from %s", path)
-	imagesToImport, imagesToImportTags, err := imagesToImport(f, path)
+	imagesToImport, imagesToImportTags, err := f.imagesToImport(path)
 	if err != nil {
 		return res, err
 	}
 
 	log.Debugf("Images to import: %v", imagesToImport)
 	for tag, file := range imagesToImport {
-		_, err := f.LoadImage(file)
+		_, err := f.feeder.LoadImage(file)
 		if err != nil {
 			log.Warnf("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
@@ -156,7 +194,7 @@ func Import(path string) (FeederLoadResponse, error) {
 					Error: err,
 				})
 		} else {
-			err = f.TagImage(tag, imagesToImportTags[tag])
+			err = f.feeder.TagImage(tag, imagesToImportTags[tag])
 			if err != nil {
 				log.Warnf("Could not tag image %s: %v", file, err)
 				res.FailedImports = append(
@@ -174,16 +212,51 @@ func Import(path string) (FeederLoadResponse, error) {
 	return res, nil
 }
 
+//normalizeNameTag split the image into it's name and tag.
+func normalizeNameTag(image string) (string, string, error) {
+	ref, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return "", "", fmt.Errorf("error parsing image name '%s': %v", err)
+	}
+	tag := ""
+	nt, isTagged := ref.(reference.NamedTagged)
+	if isTagged {
+		tag = nt.Tag()
+	}
+	return ref.Name(), tag, nil
+}
+
+// isWhitelisted returns true if the image matches any element in the whitelist.
+// Notice that the image has the format `repo:tag` while only the repo must
+// match a list element.
+func isWhitelisted(image string, whitelist []string) (bool, error) {
+	if len(whitelist) == 0 {
+		return true, nil
+	}
+
+	image, _, err := normalizeNameTag(image)
+	if err != nil {
+		return false, err
+	}
+
+	for _, white := range whitelist {
+		if white == image {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // imagesToImport computes the RPMs images that have to be loaded into Docker
 // and returns a map with the repotag string as key and the name of the file as
 // value and a map with additional repotags.
-func imagesToImport(f Feeder, path string) (map[string]string, map[string][]string, error) {
+func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]string, error) {
 	rpmImages, rpmImageTags, err := findRPMImages(path)
 	if err != nil {
 		return rpmImages, rpmImageTags, err
 	}
 
-	images, err := f.Images()
+	images, err := f.feeder.Images()
 	if err != nil {
 		return rpmImages, rpmImageTags, err
 	}
@@ -201,6 +274,17 @@ func imagesToImport(f Feeder, path string) (map[string]string, map[string][]stri
 			needsImport = true
 		}
 
+		whitelisted, err := isWhitelisted(rpmImage, f.config.Whitelist)
+		if err != nil {
+			return nil, nil, err
+		}
+		if whitelisted == false {
+			log.Debugf("Image %s is not whitelisted: removing", rpmImage)
+			needsImport = false
+		} else {
+			log.Debugf("Image %s is whitelisted: importing", rpmImage)
+		}
+
 		for _, additionalTag := range rpmImageTags[rpmImage] {
 			if stringInSlice(additionalTag, images) == false {
 				needsImport = true
@@ -208,7 +292,7 @@ func imagesToImport(f Feeder, path string) (map[string]string, map[string][]stri
 		}
 
 		if needsImport == false {
-			log.Info("Skipping import of ", rpmImage, " all tags exist")
+			log.Infof("Skipping import of '%s': tag either exists or isn't whitelisted", rpmImage)
 			// ignore the tags that are already known by docker
 			delete(rpmImages, rpmImage)
 			delete(rpmImageTags, rpmImage)
