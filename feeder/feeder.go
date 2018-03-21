@@ -218,7 +218,7 @@ func Import(path string) (FeederLoadResponse, error) {
 func normalizeNameTag(image string) (string, string, error) {
 	ref, err := reference.ParseNormalizedNamed(image)
 	if err != nil {
-		return "", "", fmt.Errorf("error parsing image name '%s': %v", err)
+		return "", "", fmt.Errorf("error parsing image name '%s': %v", image, err)
 	}
 	tag := ""
 	nt, isTagged := ref.(reference.NamedTagged)

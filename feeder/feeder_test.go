@@ -21,7 +21,6 @@ import (
 	"testing"
 )
 
-
 func TestNormalizeNameTag(t *testing.T) {
 	var name, tag string
 	var err error
@@ -59,10 +58,10 @@ func TestParseWhitelist(t *testing.T) {
 	list = []string{"opensuse", "opensuse/amd64"}
 	res, err = parseWhitelist(list)
 	if err != nil {
-		t.Error("unexpected error: %v", err)
+		t.Errorf("unexpected error: %v", err)
 	}
 	if res[0] != "docker.io/library/opensuse" {
-		t.Error("unexpected list element: %s", res[0])
+		t.Errorf("unexpected list element: %s", res[0])
 	}
 
 	list = []string{"registry.suse.com/coolimage:withtag"}
