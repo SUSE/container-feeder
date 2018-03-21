@@ -161,8 +161,8 @@ func NewFeeder() (*Feeder, error) {
 		log.Debugf("Feeder target '%s': using CRIOFeeder", f.config.Target)
 		f.feeder, err = NewCRIOFeeder()
 	default:
-		log.Debugf("Feeder target unspecified: defaulting to DockerFeeder")
-		f.feeder, err = NewDockerFeeder()
+		log.Debugf("Feeder target unspecified: raising an error")
+		return nil, fmt.Errorf("Unknown feeder type specified %v", err)
 	}
 
 	return &f, err
