@@ -161,8 +161,8 @@ func NewFeeder() (*Feeder, error) {
 		log.Debugf("Feeder target '%s': using CRIOFeeder", f.config.Target)
 		f.feeder, err = NewCRIOFeeder()
 	default:
-		log.Debugf("Feeder target unspecified: defaulting to DockerFeeder")
-		f.feeder, err = NewDockerFeeder()
+		log.Debugf("Feeder target unspecified: raising an error")
+		return nil, fmt.Errorf("Unknown feeder type specified %v", err)
 	}
 
 	return &f, err
@@ -218,7 +218,7 @@ func Import(path string) (FeederLoadResponse, error) {
 func normalizeNameTag(image string) (string, string, error) {
 	ref, err := reference.ParseNormalizedNamed(image)
 	if err != nil {
-		return "", "", fmt.Errorf("error parsing image name '%s': %v", err)
+		return "", "", fmt.Errorf("error parsing image name '%s': %v", image, err)
 	}
 	tag := ""
 	nt, isTagged := ref.(reference.NamedTagged)
@@ -249,11 +249,14 @@ func isWhitelisted(image string, whitelist []string) (bool, error) {
 	return false, nil
 }
 
-// imagesToImport computes the RPMs images that have to be loaded into Docker
+// imagesToImport computes the RPMs images that have to be loaded into the CRI
 // and returns a map with the repotag string as key and the name of the file as
 // value and a map with additional repotags.
 func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]string, error) {
-	rpmImages, rpmImageTags, err := findRPMImages(path)
+	rpmImages := make(map[string]string)
+	rpmImageTags := make(map[string][]string)
+
+	currentRpmImages, currentRpmImageTags, err := findRPMImages(path)
 	if err != nil {
 		return rpmImages, rpmImageTags, err
 	}
@@ -269,37 +272,26 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 		log.Debugf("%s", img)
 	}
 
-	for rpmImage, _ := range rpmImages {
-		needsImport := false
-
-		if stringInSlice(rpmImage, images) == false {
-			needsImport = true
-		}
-
+	for rpmImage, _ := range currentRpmImages {
 		whitelisted, err := isWhitelisted(rpmImage, f.config.Whitelist)
 		if err != nil {
 			return nil, nil, err
 		}
 		if whitelisted == false {
-			log.Debugf("Image %s is not whitelisted: removing", rpmImage)
-			needsImport = false
+			log.Debugf("Image %s is not whitelisted: ignoring", rpmImage)
 		} else {
-			log.Debugf("Image %s is whitelisted: importing", rpmImage)
-		}
-
-		for _, additionalTag := range rpmImageTags[rpmImage] {
-			if stringInSlice(additionalTag, images) == false {
-				needsImport = true
+			if stringInSlice(rpmImage, images) {
+				log.Debugf("Image %s is whitelisted but has already been imported", rpmImage)
+			} else {
+				// The image is whitelisted and has not been imported yet
+				log.Debugf("Image %s is whitelisted: marking as to be imported", rpmImage)
+				rpmImages[rpmImage] = currentRpmImages[rpmImage]
+				rpmImageTags[rpmImage] = currentRpmImageTags[rpmImage]
 			}
 		}
-
-		if needsImport == false {
-			log.Infof("Skipping import of '%s': tag either exists or isn't whitelisted", rpmImage)
-			// ignore the tags that are already known by docker
-			delete(rpmImages, rpmImage)
-			delete(rpmImageTags, rpmImage)
-		}
 	}
+
+	log.Debugf("Images to be imported %+v", rpmImageTags)
 
 	return rpmImages, rpmImageTags, nil
 }
@@ -333,7 +325,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 		}
 	}
 
-	log.Debugf("Found the following RPM images: %v", images)
+	log.Debugf("Found the following RPM images: %+v", images)
 	return images, image_tags, nil
 }
 
@@ -351,13 +343,18 @@ func repotagFromRPMFile(file string) (string, []string, string, error) {
 		return "", nil, "", err
 	}
 
-	repotag := metadata.Image.Name + ":" + metadata.Image.Tags[0]
+	normalizedName, _, err := normalizeNameTag(metadata.Image.Name)
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	repotag := normalizedName + ":" + metadata.Image.Tags[0]
 	image := metadata.Image.File
 
 	repotags := make([]string, 0)
 
 	for _, tag := range metadata.Image.Tags[1:] {
-		repotags = append(repotags, metadata.Image.Name+":"+tag)
+		repotags = append(repotags, normalizedName+":"+tag)
 	}
 
 	return repotag, repotags, image, nil
