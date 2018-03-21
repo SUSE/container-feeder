@@ -249,11 +249,14 @@ func isWhitelisted(image string, whitelist []string) (bool, error) {
 	return false, nil
 }
 
-// imagesToImport computes the RPMs images that have to be loaded into Docker
+// imagesToImport computes the RPMs images that have to be loaded into the CRI
 // and returns a map with the repotag string as key and the name of the file as
 // value and a map with additional repotags.
 func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]string, error) {
-	rpmImages, rpmImageTags, err := findRPMImages(path)
+	rpmImages := make(map[string]string)
+	rpmImageTags := make(map[string][]string)
+
+	currentRpmImages, currentRpmImageTags, err := findRPMImages(path)
 	if err != nil {
 		return rpmImages, rpmImageTags, err
 	}
@@ -269,37 +272,26 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 		log.Debugf("%s", img)
 	}
 
-	for rpmImage, _ := range rpmImages {
-		needsImport := false
-
-		if stringInSlice(rpmImage, images) == false {
-			needsImport = true
-		}
-
+	for rpmImage, _ := range currentRpmImages {
 		whitelisted, err := isWhitelisted(rpmImage, f.config.Whitelist)
 		if err != nil {
 			return nil, nil, err
 		}
 		if whitelisted == false {
-			log.Debugf("Image %s is not whitelisted: removing", rpmImage)
-			needsImport = false
+			log.Debugf("Image %s is not whitelisted: ignoring", rpmImage)
 		} else {
-			log.Debugf("Image %s is whitelisted: importing", rpmImage)
-		}
-
-		for _, additionalTag := range rpmImageTags[rpmImage] {
-			if stringInSlice(additionalTag, images) == false {
-				needsImport = true
+			if stringInSlice(rpmImage, images) {
+				log.Debugf("Image %s is whitelisted but has already been imported", rpmImage)
+			} else {
+				// The image is whitelisted and has not been imported yet
+				log.Debugf("Image %s is whitelisted: marking as to be imported", rpmImage)
+				rpmImages[rpmImage] = currentRpmImages[rpmImage]
+				rpmImageTags[rpmImage] = currentRpmImageTags[rpmImage]
 			}
 		}
-
-		if needsImport == false {
-			log.Infof("Skipping import of '%s': tag either exists or isn't whitelisted", rpmImage)
-			// ignore the tags that are already known by docker
-			delete(rpmImages, rpmImage)
-			delete(rpmImageTags, rpmImage)
-		}
 	}
+
+	log.Debugf("Images to be imported %+v", rpmImageTags)
 
 	return rpmImages, rpmImageTags, nil
 }
@@ -333,7 +325,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 		}
 	}
 
-	log.Debugf("Found the following RPM images: %v", images)
+	log.Debugf("Found the following RPM images: %+v", images)
 	return images, image_tags, nil
 }
 
