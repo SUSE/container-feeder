@@ -97,7 +97,11 @@ func (f *DockerFeeder) Images() ([]string, error) {
 
 	for _, image := range images {
 		for _, tag := range image.RepoTags {
-			tags = append(tags, tag)
+			normalizedName, normalizedTag, err := normalizeNameTag(tag)
+			if err != nil {
+				return []string{}, err
+			}
+			tags = append(tags, normalizedName+":"+normalizedTag)
 		}
 	}
 

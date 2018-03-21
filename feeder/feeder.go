@@ -351,13 +351,18 @@ func repotagFromRPMFile(file string) (string, []string, string, error) {
 		return "", nil, "", err
 	}
 
-	repotag := metadata.Image.Name + ":" + metadata.Image.Tags[0]
+	normalizedName, _, err := normalizeNameTag(metadata.Image.Name)
+	if err != nil {
+		return "", nil, "", err
+	}
+
+	repotag := normalizedName + ":" + metadata.Image.Tags[0]
 	image := metadata.Image.File
 
 	repotags := make([]string, 0)
 
 	for _, tag := range metadata.Image.Tags[1:] {
-		repotags = append(repotags, metadata.Image.Name+":"+tag)
+		repotags = append(repotags, normalizedName+":"+tag)
 	}
 
 	return repotag, repotags, image, nil
