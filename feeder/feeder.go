@@ -249,6 +249,17 @@ func isWhitelisted(image string, whitelist []string) (bool, error) {
 	return false, nil
 }
 
+// shouldImportImage will check if any tag under newTags is not inside oldTags.
+// If any tag is found that matches this condition, we should import the image.
+func (f *Feeder) shouldImportImage(oldTags, newTags []string) (bool) {
+	for _, newTag := range newTags {
+		if !stringInSlice(newTag, oldTags) {
+			return true
+		}
+	}
+	return false
+}
+
 // imagesToImport computes the RPMs images that have to be loaded into the CRI
 // and returns a map with the repotag string as key and the name of the file as
 // value and a map with additional repotags.
@@ -280,13 +291,13 @@ func (f *Feeder) imagesToImport(path string) (map[string]string, map[string][]st
 		if whitelisted == false {
 			log.Debugf("Image %s is not whitelisted: ignoring", rpmImage)
 		} else {
-			if stringInSlice(rpmImage, images) {
-				log.Debugf("Image %s is whitelisted but has already been imported", rpmImage)
-			} else {
+			if f.shouldImportImage(images, currentRpmImageTags[rpmImage]) {
 				// The image is whitelisted and has not been imported yet
 				log.Debugf("Image %s is whitelisted: marking as to be imported", rpmImage)
 				rpmImages[rpmImage] = currentRpmImages[rpmImage]
 				rpmImageTags[rpmImage] = currentRpmImageTags[rpmImage]
+			} else {
+				log.Debugf("Image %s is whitelisted but has already been imported", rpmImage)
 			}
 		}
 	}
