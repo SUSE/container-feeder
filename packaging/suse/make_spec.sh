@@ -131,7 +131,12 @@ ln -s %{_sbindir}/service %{buildroot}/%{_sbindir}/rc%{name}
 %fdupes %{buildroot}/%{_prefix}
 
 %files
-%doc README.md LICENSE
+%doc README.md
+%if 0%{?suse_version} < 1500
+%doc LICENSE
+%else
+%license LICENSE
+%endif
 %{_bindir}/%{name}
 %{_sbindir}/rc%{name}
 %{_unitdir}/%{name}.service
