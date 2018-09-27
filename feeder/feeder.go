@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 
 	"github.com/containers/image/docker/reference"
 
@@ -216,6 +217,9 @@ func Import(path string) (FeederLoadResponse, error) {
 
 //normalizeNameTag split the image into it's name and tag.
 func normalizeNameTag(image string) (string, string, error) {
+	// Remove illegal characters when image is "<none>:<none>"
+	re := regexp.MustCompile(`<|>`)
+	image = re.ReplaceAllString(image, "")
 	ref, err := reference.ParseNormalizedNamed(image)
 	if err != nil {
 		return "", "", fmt.Errorf("error parsing image name '%s': %v", image, err)

@@ -45,6 +45,11 @@ func TestNormalizeNameTag(t *testing.T) {
 		t.Errorf("unexpected output: name: %s, tag: %s, err: %v", name, tag, err)
 	}
 
+	name, tag, err = normalizeNameTag("<none>:<none>")
+	if err != nil || name != "docker.io/library/none" || tag != "none" {
+		t.Errorf("unexpected output: name: %s, tag: %s, err: %v", name, tag, err)
+	}
+
 	name, tag, err = normalizeNameTag("invalidtag:")
 	if err == nil {
 		t.Errorf("unexpected output: name: %s, tag: %s, err: %v", name, tag, err)
