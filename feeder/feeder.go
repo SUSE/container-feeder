@@ -159,6 +159,8 @@ func NewFeeder() (*Feeder, error) {
 		log.Debugf("Feeder target '%s': using DockerFeeder", f.config.Target)
 		f.feeder, err = NewDockerFeeder()
 	case "crio":
+		fallthrough
+	case "podman":
 		log.Debugf("Feeder target '%s': using CRIOFeeder", f.config.Target)
 		f.feeder, err = NewCRIOFeeder()
 	default:

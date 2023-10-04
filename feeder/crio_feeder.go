@@ -18,37 +18,32 @@
 package feeder
 
 import (
+	"context"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"os"
 
-	"github.com/containers/image/docker/reference"
-	"github.com/containers/storage"
+	"github.com/containers/common/libimage"
+	"github.com/containers/image/v5/docker/reference"
+	"github.com/containers/podman/v4/libpod"
 	"github.com/containers/storage/pkg/reexec"
-	"github.com/projectatomic/libpod/libpod"
 
 	log "github.com/sirupsen/logrus"
 )
 
 // CRIOFeeder wraps the libpod.Runtime and implementes the Feeder interface.
 type CRIOFeeder struct {
-	runtime *libpod.Runtime
+	runtime           *libpod.Runtime
+	backgroundContext context.Context
 }
 
 // NewCRIOFeeder returns a pointer to an initialized CRIOFeeder.
 func NewCRIOFeeder() (*CRIOFeeder, error) {
-	feeder := &CRIOFeeder{}
+	feeder := &CRIOFeeder{backgroundContext: context.Background()}
 
 	if reexec.Init() {
 		return nil, fmt.Errorf("could not init CRIOFeeder")
 	}
 
-	options := []libpod.RuntimeOption{}
-	storageOpts := storage.DefaultStoreOptions
-	options = append(options, libpod.WithStorageConfig(storageOpts))
-
-	runtime, err := libpod.NewRuntime(options...)
+	runtime, err := libpod.NewRuntime(feeder.backgroundContext)
 	if err != nil {
 		return nil, fmt.Errorf("error getting libpod runtime: %v", err)
 	}
@@ -61,67 +56,38 @@ func NewCRIOFeeder() (*CRIOFeeder, error) {
 func (f *CRIOFeeder) Images() ([]string, error) {
 	tags := []string{}
 
-	images, err := f.runtime.GetImageResults()
+	imgs := []string{}
+	images, err := f.runtime.LibimageRuntime().ListImages(f.backgroundContext, imgs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error getting images from libpod: %v", err)
 	}
 
 	for _, img := range images {
-		tags = append(tags, img.RepoTags...)
+		imgTags, err := img.RepoTags()
+		if err != nil {
+			return nil, err
+		}
+		tags = append(tags, imgTags...)
 	}
 
 	return tags, nil
 }
 
-// decompressXZImage decompresses the specified tar.xz into a tar image that is
-// located in /var/tmp (writable on MicroOS).
-func decompressXZImage(image string) (string, error) {
-	log.Debugf("Decompressing image %s", image)
-
-	tmpFile, err := ioutil.TempFile("/var/tmp", "container-feeder")
-	if err != nil {
-		return "", fmt.Errorf("error creating temporary file: %v", err)
-	}
-	defer tmpFile.Close()
-
-	cmd := []string{"/usr/bin/unxz", "-c", image}
-	if err := runCommand(cmd, "", tmpFile); err != nil {
-		return "", fmt.Errorf("error using xz: %v", err)
-	}
-
-	return tmpFile.Name(), nil
-}
-
 // LoadImage loads the specified image into containers/storage and returns the
 // image name.
 func (f *CRIOFeeder) LoadImage(path string) (string, error) {
-	var writer io.Writer
-	options := libpod.CopyOptions{
-		Writer: writer,
-	}
-
-	image, err := decompressXZImage(path)
+	imgs, err := f.runtime.LibimageRuntime().Load(f.backgroundContext, path, nil)
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(image)
 
-	src := libpod.DockerArchive + ":" + image
-	imgName, err := f.runtime.PullImage(src, options)
-	if err != nil {
-		return "", fmt.Errorf("error loading image: %v", err)
-	}
-
-	log.Debugf("Loaded image: %v", imgName)
-	return imgName, nil
+	log.Debugf("Loaded image(s): %v", imgs)
+	return imgs[0], nil
 }
 
 // TagImage tags the specified image with the supplied tags.
 func (f *CRIOFeeder) TagImage(image string, tags []string) error {
-	newImage := f.runtime.NewImage(image)
-	newImage.GetLocalImageName()
-
-	img, err := f.runtime.GetImage(newImage.LocalName)
+	img, _, err := f.runtime.LibimageRuntime().LookupImage(image, nil)
 	if err != nil {
 		return err
 	}
@@ -137,15 +103,15 @@ func (f *CRIOFeeder) TagImage(image string, tags []string) error {
 }
 
 // addImageNames adds addNames to the specified image
-func (f *CRIOFeeder) addImageNames(image *storage.Image, names []string) error {
+func (f *CRIOFeeder) addImageNames(image *libimage.Image, names []string) error {
 	// Add tags to the names if applicable
 	tags, err := expandedTags(names)
 	if err != nil {
 		return err
 	}
 	for _, tag := range tags {
-		if err := f.runtime.TagImage(image, tag); err != nil {
-			return fmt.Errorf("error adding name (%v) to image %q", tag, image.ID)
+		if err := image.Tag(tag); err != nil {
+			return fmt.Errorf("error adding name (%v) to image %q", tag, image.ID())
 		}
 	}
 	return nil
