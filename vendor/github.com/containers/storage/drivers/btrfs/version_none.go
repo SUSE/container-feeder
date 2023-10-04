@@ -1,4 +1,5 @@
-// +build linux,btrfs_noversion
+//go:build linux && btrfs_noversion && cgo
+// +build linux,btrfs_noversion,cgo
 
 package btrfs
 

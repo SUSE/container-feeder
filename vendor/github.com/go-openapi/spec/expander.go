@@ -17,610 +17,578 @@ package spec
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"reflect"
-	"strings"
-	"sync"
-
-	"github.com/go-openapi/jsonpointer"
-	"github.com/go-openapi/swag"
 )
 
-// ResolutionCache a cache for resolving urls
-type ResolutionCache interface {
-	Get(string) (interface{}, bool)
-	Set(string, interface{})
+// ExpandOptions provides options for the spec expander.
+//
+// RelativeBase is the path to the root document. This can be a remote URL or a path to a local file.
+//
+// If left empty, the root document is assumed to be located in the current working directory:
+// all relative $ref's will be resolved from there.
+//
+// PathLoader injects a document loading method. By default, this resolves to the function provided by the SpecLoader package variable.
+//
+type ExpandOptions struct {
+	RelativeBase        string                                // the path to the root document to expand. This is a file, not a directory
+	SkipSchemas         bool                                  // do not expand schemas, just paths, parameters and responses
+	ContinueOnError     bool                                  // continue expanding even after and error is found
+	PathLoader          func(string) (json.RawMessage, error) `json:"-"` // the document loading method that takes a path as input and yields a json document
+	AbsoluteCircularRef bool                                  // circular $ref remaining after expansion remain absolute URLs
 }
 
-type simpleCache struct {
-	lock  sync.Mutex
-	store map[string]interface{}
-}
-
-var resCache = initResolutionCache()
-
-func initResolutionCache() ResolutionCache {
-	return &simpleCache{store: map[string]interface{}{
-		"http://swagger.io/v2/schema.json":       MustLoadSwagger20Schema(),
-		"http://json-schema.org/draft-04/schema": MustLoadJSONSchemaDraft04(),
-	}}
-}
-
-func (s *simpleCache) Get(uri string) (interface{}, bool) {
-	s.lock.Lock()
-	v, ok := s.store[uri]
-	s.lock.Unlock()
-	return v, ok
-}
-
-func (s *simpleCache) Set(uri string, data interface{}) {
-	s.lock.Lock()
-	s.store[uri] = data
-	s.lock.Unlock()
-}
-
-// ResolveRef resolves a reference against a context root
-func ResolveRef(root interface{}, ref *Ref) (*Schema, error) {
-	resolver, err := defaultSchemaLoader(root, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	result := new(Schema)
-	if err := resolver.Resolve(ref, result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// ResolveParameter resolves a paramter reference against a context root
-func ResolveParameter(root interface{}, ref Ref) (*Parameter, error) {
-	resolver, err := defaultSchemaLoader(root, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	result := new(Parameter)
-	if err := resolver.Resolve(&ref, result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-// ResolveResponse resolves response a reference against a context root
-func ResolveResponse(root interface{}, ref Ref) (*Response, error) {
-	resolver, err := defaultSchemaLoader(root, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	result := new(Response)
-	if err := resolver.Resolve(&ref, result); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-type schemaLoader struct {
-	loadingRef  *Ref
-	startingRef *Ref
-	currentRef  *Ref
-	root        interface{}
-	cache       ResolutionCache
-	loadDoc     func(string) (json.RawMessage, error)
-}
-
-var idPtr, _ = jsonpointer.New("/id")
-var schemaPtr, _ = jsonpointer.New("/$schema")
-var refPtr, _ = jsonpointer.New("/$ref")
-
-func defaultSchemaLoader(root interface{}, ref *Ref, cache ResolutionCache) (*schemaLoader, error) {
-	if cache == nil {
-		cache = resCache
-	}
-
-	var ptr *jsonpointer.Pointer
-	if ref != nil {
-		ptr = ref.GetPointer()
-	}
-
-	currentRef := nextRef(root, ref, ptr)
-
-	return &schemaLoader{
-		root:        root,
-		loadingRef:  ref,
-		startingRef: ref,
-		cache:       cache,
-		loadDoc: func(path string) (json.RawMessage, error) {
-			data, err := swag.LoadFromFileOrHTTP(path)
-			if err != nil {
-				return nil, err
-			}
-			return json.RawMessage(data), nil
-		},
-		currentRef: currentRef,
-	}, nil
-}
-
-func idFromNode(node interface{}) (*Ref, error) {
-	if idValue, _, err := idPtr.Get(node); err == nil {
-		if refStr, ok := idValue.(string); ok && refStr != "" {
-			idRef, err := NewRef(refStr)
-			if err != nil {
-				return nil, err
-			}
-			return &idRef, nil
+func optionsOrDefault(opts *ExpandOptions) *ExpandOptions {
+	if opts != nil {
+		clone := *opts // shallow clone to avoid internal changes to be propagated to the caller
+		if clone.RelativeBase != "" {
+			clone.RelativeBase = normalizeBase(clone.RelativeBase)
 		}
+		// if the relative base is empty, let the schema loader choose a pseudo root document
+		return &clone
 	}
-	return nil, nil
-}
-
-func nextRef(startingNode interface{}, startingRef *Ref, ptr *jsonpointer.Pointer) *Ref {
-	if startingRef == nil {
-		return nil
-	}
-	if ptr == nil {
-		return startingRef
-	}
-
-	ret := startingRef
-	var idRef *Ref
-	node := startingNode
-
-	for _, tok := range ptr.DecodedTokens() {
-		node, _, _ = jsonpointer.GetForToken(node, tok)
-		if node == nil {
-			break
-		}
-
-		idRef, _ = idFromNode(node)
-		if idRef != nil {
-			nw, err := ret.Inherits(*idRef)
-			if err != nil {
-				break
-			}
-			ret = nw
-		}
-
-		refRef, _, _ := refPtr.Get(node)
-		if refRef != nil {
-			rf, _ := NewRef(refRef.(string))
-			nw, err := ret.Inherits(rf)
-			if err != nil {
-				break
-			}
-			ret = nw
-		}
-
-	}
-	return ret
-}
-
-func (r *schemaLoader) resolveRef(currentRef, ref *Ref, node, target interface{}) error {
-	tgt := reflect.ValueOf(target)
-	if tgt.Kind() != reflect.Ptr {
-		return fmt.Errorf("resolve ref: target needs to be a pointer")
-	}
-
-	oldRef := currentRef
-	if currentRef != nil {
-		var err error
-		currentRef, err = currentRef.Inherits(*nextRef(node, ref, currentRef.GetPointer()))
-		if err != nil {
-			return err
-		}
-	}
-	if currentRef == nil {
-		currentRef = ref
-	}
-
-	refURL := currentRef.GetURL()
-	if refURL == nil {
-		return nil
-	}
-	if currentRef.IsRoot() {
-		nv := reflect.ValueOf(node)
-		reflect.Indirect(tgt).Set(reflect.Indirect(nv))
-		return nil
-	}
-
-	if strings.HasPrefix(refURL.String(), "#") {
-		res, _, err := ref.GetPointer().Get(node)
-		if err != nil {
-			res, _, err = ref.GetPointer().Get(r.root)
-			if err != nil {
-				return err
-			}
-		}
-		rv := reflect.Indirect(reflect.ValueOf(res))
-		tgtType := reflect.Indirect(tgt).Type()
-		if rv.Type().AssignableTo(tgtType) {
-			reflect.Indirect(tgt).Set(reflect.Indirect(reflect.ValueOf(res)))
-		} else {
-			if err := swag.DynamicJSONToStruct(rv.Interface(), target); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
-	if refURL.Scheme != "" && refURL.Host != "" {
-		// most definitely take the red pill
-		data, _, _, err := r.load(refURL)
-		if err != nil {
-			return err
-		}
-
-		if ((oldRef == nil && currentRef != nil) ||
-			(oldRef != nil && currentRef == nil) ||
-			oldRef.String() != currentRef.String()) &&
-			((oldRef == nil && ref != nil) ||
-				(oldRef != nil && ref == nil) ||
-				(oldRef.String() != ref.String())) {
-
-			return r.resolveRef(currentRef, ref, data, target)
-		}
-
-		var res interface{}
-		if currentRef.String() != "" {
-			res, _, err = currentRef.GetPointer().Get(data)
-			if err != nil {
-				return err
-			}
-		} else {
-			res = data
-		}
-
-		if err := swag.DynamicJSONToStruct(res, target); err != nil {
-			return err
-		}
-
-	}
-	return nil
-}
-
-func (r *schemaLoader) load(refURL *url.URL) (interface{}, url.URL, bool, error) {
-	toFetch := *refURL
-	toFetch.Fragment = ""
-
-	data, fromCache := r.cache.Get(toFetch.String())
-	if !fromCache {
-		b, err := r.loadDoc(toFetch.String())
-		if err != nil {
-			return nil, url.URL{}, false, err
-		}
-
-		if err := json.Unmarshal(b, &data); err != nil {
-			return nil, url.URL{}, false, err
-		}
-		r.cache.Set(toFetch.String(), data)
-	}
-
-	return data, toFetch, fromCache, nil
-}
-func (r *schemaLoader) Resolve(ref *Ref, target interface{}) error {
-	if err := r.resolveRef(r.currentRef, ref, r.root, target); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-type specExpander struct {
-	spec     *Swagger
-	resolver *schemaLoader
+	return &ExpandOptions{}
 }
 
 // ExpandSpec expands the references in a swagger spec
-func ExpandSpec(spec *Swagger) error {
-	resolver, err := defaultSchemaLoader(spec, nil, nil)
-	if err != nil {
-		return err
-	}
+func ExpandSpec(spec *Swagger, options *ExpandOptions) error {
+	options = optionsOrDefault(options)
+	resolver := defaultSchemaLoader(spec, options, nil, nil)
 
-	for key, defintition := range spec.Definitions {
-		var def *Schema
-		var err error
-		if def, err = expandSchema(defintition, []string{"#/definitions/" + key}, resolver); err != nil {
-			return err
+	specBasePath := options.RelativeBase
+
+	if !options.SkipSchemas {
+		for key, definition := range spec.Definitions {
+			parentRefs := make([]string, 0, 10)
+			parentRefs = append(parentRefs, fmt.Sprintf("#/definitions/%s", key))
+
+			def, err := expandSchema(definition, parentRefs, resolver, specBasePath)
+			if resolver.shouldStopOnError(err) {
+				return err
+			}
+			if def != nil {
+				spec.Definitions[key] = *def
+			}
 		}
-		spec.Definitions[key] = *def
 	}
 
-	for key, parameter := range spec.Parameters {
-		if err := expandParameter(&parameter, resolver); err != nil {
+	for key := range spec.Parameters {
+		parameter := spec.Parameters[key]
+		if err := expandParameterOrResponse(&parameter, resolver, specBasePath); resolver.shouldStopOnError(err) {
 			return err
 		}
 		spec.Parameters[key] = parameter
 	}
 
-	for key, response := range spec.Responses {
-		if err := expandResponse(&response, resolver); err != nil {
+	for key := range spec.Responses {
+		response := spec.Responses[key]
+		if err := expandParameterOrResponse(&response, resolver, specBasePath); resolver.shouldStopOnError(err) {
 			return err
 		}
 		spec.Responses[key] = response
 	}
 
 	if spec.Paths != nil {
-		for key, path := range spec.Paths.Paths {
-			if err := expandPathItem(&path, resolver); err != nil {
+		for key := range spec.Paths.Paths {
+			pth := spec.Paths.Paths[key]
+			if err := expandPathItem(&pth, resolver, specBasePath); resolver.shouldStopOnError(err) {
 				return err
 			}
-			spec.Paths.Paths[key] = path
+			spec.Paths.Paths[key] = pth
 		}
 	}
 
 	return nil
 }
 
-// ExpandSchema expands the refs in the schema object
-func ExpandSchema(schema *Schema, root interface{}, cache ResolutionCache) error {
+const rootBase = ".root"
 
-	if schema == nil {
-		return nil
+// baseForRoot loads in the cache the root document and produces a fake ".root" base path entry
+// for further $ref resolution
+//
+// Setting the cache is optional and this parameter may safely be left to nil.
+func baseForRoot(root interface{}, cache ResolutionCache) string {
+	if root == nil {
+		return ""
 	}
+
+	// cache the root document to resolve $ref's
+	normalizedBase := normalizeBase(rootBase)
+	cache.Set(normalizedBase, root)
+
+	return normalizedBase
+}
+
+// ExpandSchema expands the refs in the schema object with reference to the root object.
+//
+// go-openapi/validate uses this function.
+//
+// Notice that it is impossible to reference a json schema in a different document other than root
+// (use ExpandSchemaWithBasePath to resolve external references).
+//
+// Setting the cache is optional and this parameter may safely be left to nil.
+func ExpandSchema(schema *Schema, root interface{}, cache ResolutionCache) error {
+	cache = cacheOrDefault(cache)
 	if root == nil {
 		root = schema
 	}
 
-	nrr, _ := NewRef(schema.ID)
-	var rrr *Ref
-	if nrr.String() != "" {
-		switch root.(type) {
-		case *Schema:
-			rid, _ := NewRef(root.(*Schema).ID)
-			rrr, _ = rid.Inherits(nrr)
-		case *Swagger:
-			rid, _ := NewRef(root.(*Swagger).ID)
-			rrr, _ = rid.Inherits(nrr)
-		}
-
+	opts := &ExpandOptions{
+		// when a root is specified, cache the root as an in-memory document for $ref retrieval
+		RelativeBase:    baseForRoot(root, cache),
+		SkipSchemas:     false,
+		ContinueOnError: false,
 	}
 
-	resolver, err := defaultSchemaLoader(root, rrr, cache)
+	return ExpandSchemaWithBasePath(schema, cache, opts)
+}
+
+// ExpandSchemaWithBasePath expands the refs in the schema object, base path configured through expand options.
+//
+// Setting the cache is optional and this parameter may safely be left to nil.
+func ExpandSchemaWithBasePath(schema *Schema, cache ResolutionCache, opts *ExpandOptions) error {
+	if schema == nil {
+		return nil
+	}
+
+	cache = cacheOrDefault(cache)
+
+	opts = optionsOrDefault(opts)
+
+	resolver := defaultSchemaLoader(nil, opts, cache, nil)
+
+	parentRefs := make([]string, 0, 10)
+	s, err := expandSchema(*schema, parentRefs, resolver, opts.RelativeBase)
 	if err != nil {
 		return err
 	}
+	if s != nil {
+		// guard for when continuing on error
+		*schema = *s
+	}
 
-	refs := []string{""}
-	if rrr != nil {
-		refs[0] = rrr.String()
-	}
-	var s *Schema
-	if s, err = expandSchema(*schema, refs, resolver); err != nil {
-		return nil
-	}
-	*schema = *s
 	return nil
 }
 
-func expandItems(target Schema, parentRefs []string, resolver *schemaLoader) (*Schema, error) {
-	if target.Items != nil {
-		if target.Items.Schema != nil {
-			t, err := expandSchema(*target.Items.Schema, parentRefs, resolver)
-			if err != nil {
-				return nil, err
-			}
-			*target.Items.Schema = *t
+func expandItems(target Schema, parentRefs []string, resolver *schemaLoader, basePath string) (*Schema, error) {
+	if target.Items == nil {
+		return &target, nil
+	}
+
+	// array
+	if target.Items.Schema != nil {
+		t, err := expandSchema(*target.Items.Schema, parentRefs, resolver, basePath)
+		if err != nil {
+			return nil, err
 		}
-		for i := range target.Items.Schemas {
-			t, err := expandSchema(target.Items.Schemas[i], parentRefs, resolver)
-			if err != nil {
-				return nil, err
+		*target.Items.Schema = *t
+	}
+
+	// tuple
+	for i := range target.Items.Schemas {
+		t, err := expandSchema(target.Items.Schemas[i], parentRefs, resolver, basePath)
+		if err != nil {
+			return nil, err
+		}
+		target.Items.Schemas[i] = *t
+	}
+
+	return &target, nil
+}
+
+func expandSchema(target Schema, parentRefs []string, resolver *schemaLoader, basePath string) (*Schema, error) {
+	if target.Ref.String() == "" && target.Ref.IsRoot() {
+		newRef := normalizeRef(&target.Ref, basePath)
+		target.Ref = *newRef
+		return &target, nil
+	}
+
+	// change the base path of resolution when an ID is encountered
+	// otherwise the basePath should inherit the parent's
+	if target.ID != "" {
+		basePath, _ = resolver.setSchemaID(target, target.ID, basePath)
+	}
+
+	if target.Ref.String() != "" {
+		return expandSchemaRef(target, parentRefs, resolver, basePath)
+	}
+
+	for k := range target.Definitions {
+		tt, err := expandSchema(target.Definitions[k], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if tt != nil {
+			target.Definitions[k] = *tt
+		}
+	}
+
+	t, err := expandItems(target, parentRefs, resolver, basePath)
+	if resolver.shouldStopOnError(err) {
+		return &target, err
+	}
+	if t != nil {
+		target = *t
+	}
+
+	for i := range target.AllOf {
+		t, err := expandSchema(target.AllOf[i], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			target.AllOf[i] = *t
+		}
+	}
+
+	for i := range target.AnyOf {
+		t, err := expandSchema(target.AnyOf[i], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			target.AnyOf[i] = *t
+		}
+	}
+
+	for i := range target.OneOf {
+		t, err := expandSchema(target.OneOf[i], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			target.OneOf[i] = *t
+		}
+	}
+
+	if target.Not != nil {
+		t, err := expandSchema(*target.Not, parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			*target.Not = *t
+		}
+	}
+
+	for k := range target.Properties {
+		t, err := expandSchema(target.Properties[k], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			target.Properties[k] = *t
+		}
+	}
+
+	if target.AdditionalProperties != nil && target.AdditionalProperties.Schema != nil {
+		t, err := expandSchema(*target.AdditionalProperties.Schema, parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			*target.AdditionalProperties.Schema = *t
+		}
+	}
+
+	for k := range target.PatternProperties {
+		t, err := expandSchema(target.PatternProperties[k], parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			target.PatternProperties[k] = *t
+		}
+	}
+
+	for k := range target.Dependencies {
+		if target.Dependencies[k].Schema != nil {
+			t, err := expandSchema(*target.Dependencies[k].Schema, parentRefs, resolver, basePath)
+			if resolver.shouldStopOnError(err) {
+				return &target, err
 			}
-			target.Items.Schemas[i] = *t
+			if t != nil {
+				*target.Dependencies[k].Schema = *t
+			}
+		}
+	}
+
+	if target.AdditionalItems != nil && target.AdditionalItems.Schema != nil {
+		t, err := expandSchema(*target.AdditionalItems.Schema, parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
+			return &target, err
+		}
+		if t != nil {
+			*target.AdditionalItems.Schema = *t
 		}
 	}
 	return &target, nil
 }
 
-func expandSchema(target Schema, parentRefs []string, resolver *schemaLoader) (schema *Schema, err error) {
-	defer func() {
-		schema = &target
-	}()
-	if target.Ref.String() == "" && target.Ref.IsRoot() {
-		target = *resolver.root.(*Schema)
-		return
+func expandSchemaRef(target Schema, parentRefs []string, resolver *schemaLoader, basePath string) (*Schema, error) {
+	// if a Ref is found, all sibling fields are skipped
+	// Ref also changes the resolution scope of children expandSchema
+
+	// here the resolution scope is changed because a $ref was encountered
+	normalizedRef := normalizeRef(&target.Ref, basePath)
+	normalizedBasePath := normalizedRef.RemoteURI()
+
+	if resolver.isCircular(normalizedRef, basePath, parentRefs...) {
+		// this means there is a cycle in the recursion tree: return the Ref
+		// - circular refs cannot be expanded. We leave them as ref.
+		// - denormalization means that a new local file ref is set relative to the original basePath
+		debugLog("short circuit circular ref: basePath: %s, normalizedPath: %s, normalized ref: %s",
+			basePath, normalizedBasePath, normalizedRef.String())
+		if !resolver.options.AbsoluteCircularRef {
+			target.Ref = denormalizeRef(normalizedRef, resolver.context.basePath, resolver.context.rootID)
+		} else {
+			target.Ref = *normalizedRef
+		}
+		return &target, nil
 	}
 
-	// t is the new expanded schema
 	var t *Schema
-	for target.Ref.String() != "" {
-		// var newTarget Schema
-		pRefs := strings.Join(parentRefs, ",")
-		pRefs += ","
-		if strings.Contains(pRefs, target.Ref.String()+",") {
-			err = nil
-			return
-		}
-
-		if err = resolver.Resolve(&target.Ref, &t); err != nil {
-			return
-		}
-		parentRefs = append(parentRefs, target.Ref.String())
-		target = *t
+	err := resolver.Resolve(&target.Ref, &t, basePath)
+	if resolver.shouldStopOnError(err) {
+		return nil, err
 	}
 
-	if t, err = expandItems(target, parentRefs, resolver); err != nil {
-		return
+	if t == nil {
+		// guard for when continuing on error
+		return &target, nil
 	}
-	target = *t
 
-	for i := range target.AllOf {
-		if t, err = expandSchema(target.AllOf[i], parentRefs, resolver); err != nil {
-			return
-		}
-		target.AllOf[i] = *t
-	}
-	for i := range target.AnyOf {
-		if t, err = expandSchema(target.AnyOf[i], parentRefs, resolver); err != nil {
-			return
-		}
-		target.AnyOf[i] = *t
-	}
-	for i := range target.OneOf {
-		if t, err = expandSchema(target.OneOf[i], parentRefs, resolver); err != nil {
-			return
-		}
-		target.OneOf[i] = *t
-	}
-	if target.Not != nil {
-		if t, err = expandSchema(*target.Not, parentRefs, resolver); err != nil {
-			return
-		}
-		*target.Not = *t
-	}
-	for k, _ := range target.Properties {
-		if t, err = expandSchema(target.Properties[k], parentRefs, resolver); err != nil {
-			return
-		}
-		target.Properties[k] = *t
-	}
-	if target.AdditionalProperties != nil && target.AdditionalProperties.Schema != nil {
-		if t, err = expandSchema(*target.AdditionalProperties.Schema, parentRefs, resolver); err != nil {
-			return
-		}
-		*target.AdditionalProperties.Schema = *t
-	}
-	for k, _ := range target.PatternProperties {
-		if t, err = expandSchema(target.PatternProperties[k], parentRefs, resolver); err != nil {
-			return
-		}
-		target.PatternProperties[k] = *t
-	}
-	for k, _ := range target.Dependencies {
-		if target.Dependencies[k].Schema != nil {
-			if t, err = expandSchema(*target.Dependencies[k].Schema, parentRefs, resolver); err != nil {
-				return
-			}
-			*target.Dependencies[k].Schema = *t
-		}
-	}
-	if target.AdditionalItems != nil && target.AdditionalItems.Schema != nil {
-		if t, err = expandSchema(*target.AdditionalItems.Schema, parentRefs, resolver); err != nil {
-			return
-		}
-		*target.AdditionalItems.Schema = *t
-	}
-	for k, _ := range target.Definitions {
-		if t, err = expandSchema(target.Definitions[k], parentRefs, resolver); err != nil {
-			return
-		}
-		target.Definitions[k] = *t
-	}
-	return
+	parentRefs = append(parentRefs, normalizedRef.String())
+	transitiveResolver := resolver.transitiveResolver(basePath, target.Ref)
+
+	basePath = resolver.updateBasePath(transitiveResolver, normalizedBasePath)
+
+	return expandSchema(*t, parentRefs, transitiveResolver, basePath)
 }
 
-func expandPathItem(pathItem *PathItem, resolver *schemaLoader) error {
+func expandPathItem(pathItem *PathItem, resolver *schemaLoader, basePath string) error {
 	if pathItem == nil {
 		return nil
 	}
+
+	parentRefs := make([]string, 0, 10)
+	if err := resolver.deref(pathItem, parentRefs, basePath); resolver.shouldStopOnError(err) {
+		return err
+	}
+
 	if pathItem.Ref.String() != "" {
-		if err := resolver.Resolve(&pathItem.Ref, &pathItem); err != nil {
+		transitiveResolver := resolver.transitiveResolver(basePath, pathItem.Ref)
+		basePath = transitiveResolver.updateBasePath(resolver, basePath)
+		resolver = transitiveResolver
+	}
+
+	pathItem.Ref = Ref{}
+	for i := range pathItem.Parameters {
+		if err := expandParameterOrResponse(&(pathItem.Parameters[i]), resolver, basePath); resolver.shouldStopOnError(err) {
 			return err
 		}
 	}
 
-	for idx := range pathItem.Parameters {
-		if err := expandParameter(&(pathItem.Parameters[idx]), resolver); err != nil {
+	ops := []*Operation{
+		pathItem.Get,
+		pathItem.Head,
+		pathItem.Options,
+		pathItem.Put,
+		pathItem.Post,
+		pathItem.Patch,
+		pathItem.Delete,
+	}
+	for _, op := range ops {
+		if err := expandOperation(op, resolver, basePath); resolver.shouldStopOnError(err) {
 			return err
 		}
 	}
-	if err := expandOperation(pathItem.Get, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Head, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Options, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Put, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Post, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Patch, resolver); err != nil {
-		return err
-	}
-	if err := expandOperation(pathItem.Delete, resolver); err != nil {
-		return err
-	}
+
 	return nil
 }
 
-func expandOperation(op *Operation, resolver *schemaLoader) error {
+func expandOperation(op *Operation, resolver *schemaLoader, basePath string) error {
 	if op == nil {
 		return nil
 	}
-	for i, param := range op.Parameters {
-		if err := expandParameter(&param, resolver); err != nil {
+
+	for i := range op.Parameters {
+		param := op.Parameters[i]
+		if err := expandParameterOrResponse(&param, resolver, basePath); resolver.shouldStopOnError(err) {
 			return err
 		}
 		op.Parameters[i] = param
 	}
 
-	if op.Responses != nil {
-		responses := op.Responses
-		if err := expandResponse(responses.Default, resolver); err != nil {
+	if op.Responses == nil {
+		return nil
+	}
+
+	responses := op.Responses
+	if err := expandParameterOrResponse(responses.Default, resolver, basePath); resolver.shouldStopOnError(err) {
+		return err
+	}
+
+	for code := range responses.StatusCodeResponses {
+		response := responses.StatusCodeResponses[code]
+		if err := expandParameterOrResponse(&response, resolver, basePath); resolver.shouldStopOnError(err) {
 			return err
 		}
-		for code, response := range responses.StatusCodeResponses {
-			if err := expandResponse(&response, resolver); err != nil {
-				return err
+		responses.StatusCodeResponses[code] = response
+	}
+
+	return nil
+}
+
+// ExpandResponseWithRoot expands a response based on a root document, not a fetchable document
+//
+// Notice that it is impossible to reference a json schema in a different document other than root
+// (use ExpandResponse to resolve external references).
+//
+// Setting the cache is optional and this parameter may safely be left to nil.
+func ExpandResponseWithRoot(response *Response, root interface{}, cache ResolutionCache) error {
+	cache = cacheOrDefault(cache)
+	opts := &ExpandOptions{
+		RelativeBase: baseForRoot(root, cache),
+	}
+	resolver := defaultSchemaLoader(root, opts, cache, nil)
+
+	return expandParameterOrResponse(response, resolver, opts.RelativeBase)
+}
+
+// ExpandResponse expands a response based on a basepath
+//
+// All refs inside response will be resolved relative to basePath
+func ExpandResponse(response *Response, basePath string) error {
+	opts := optionsOrDefault(&ExpandOptions{
+		RelativeBase: basePath,
+	})
+	resolver := defaultSchemaLoader(nil, opts, nil, nil)
+
+	return expandParameterOrResponse(response, resolver, opts.RelativeBase)
+}
+
+// ExpandParameterWithRoot expands a parameter based on a root document, not a fetchable document.
+//
+// Notice that it is impossible to reference a json schema in a different document other than root
+// (use ExpandParameter to resolve external references).
+func ExpandParameterWithRoot(parameter *Parameter, root interface{}, cache ResolutionCache) error {
+	cache = cacheOrDefault(cache)
+
+	opts := &ExpandOptions{
+		RelativeBase: baseForRoot(root, cache),
+	}
+	resolver := defaultSchemaLoader(root, opts, cache, nil)
+
+	return expandParameterOrResponse(parameter, resolver, opts.RelativeBase)
+}
+
+// ExpandParameter expands a parameter based on a basepath.
+// This is the exported version of expandParameter
+// all refs inside parameter will be resolved relative to basePath
+func ExpandParameter(parameter *Parameter, basePath string) error {
+	opts := optionsOrDefault(&ExpandOptions{
+		RelativeBase: basePath,
+	})
+	resolver := defaultSchemaLoader(nil, opts, nil, nil)
+
+	return expandParameterOrResponse(parameter, resolver, opts.RelativeBase)
+}
+
+func getRefAndSchema(input interface{}) (*Ref, *Schema, error) {
+	var (
+		ref *Ref
+		sch *Schema
+	)
+
+	switch refable := input.(type) {
+	case *Parameter:
+		if refable == nil {
+			return nil, nil, nil
+		}
+		ref = &refable.Ref
+		sch = refable.Schema
+	case *Response:
+		if refable == nil {
+			return nil, nil, nil
+		}
+		ref = &refable.Ref
+		sch = refable.Schema
+	default:
+		return nil, nil, fmt.Errorf("unsupported type: %T: %w", input, ErrExpandUnsupportedType)
+	}
+
+	return ref, sch, nil
+}
+
+func expandParameterOrResponse(input interface{}, resolver *schemaLoader, basePath string) error {
+	ref, _, err := getRefAndSchema(input)
+	if err != nil {
+		return err
+	}
+
+	if ref == nil {
+		return nil
+	}
+
+	parentRefs := make([]string, 0, 10)
+	if err = resolver.deref(input, parentRefs, basePath); resolver.shouldStopOnError(err) {
+		return err
+	}
+
+	ref, sch, _ := getRefAndSchema(input)
+	if ref.String() != "" {
+		transitiveResolver := resolver.transitiveResolver(basePath, *ref)
+		basePath = resolver.updateBasePath(transitiveResolver, basePath)
+		resolver = transitiveResolver
+	}
+
+	if sch == nil {
+		// nothing to be expanded
+		if ref != nil {
+			*ref = Ref{}
+		}
+		return nil
+	}
+
+	if sch.Ref.String() != "" {
+		rebasedRef, ern := NewRef(normalizeURI(sch.Ref.String(), basePath))
+		if ern != nil {
+			return ern
+		}
+
+		switch {
+		case resolver.isCircular(&rebasedRef, basePath, parentRefs...):
+			// this is a circular $ref: stop expansion
+			if !resolver.options.AbsoluteCircularRef {
+				sch.Ref = denormalizeRef(&rebasedRef, resolver.context.basePath, resolver.context.rootID)
+			} else {
+				sch.Ref = rebasedRef
 			}
-			responses.StatusCodeResponses[code] = response
-		}
-	}
-	return nil
-}
-
-func expandResponse(response *Response, resolver *schemaLoader) error {
-	if response == nil {
-		return nil
-	}
-
-	if response.Ref.String() != "" {
-		if err := resolver.Resolve(&response.Ref, response); err != nil {
-			return err
+		case !resolver.options.SkipSchemas:
+			// schema expanded to a $ref in another root
+			sch.Ref = rebasedRef
+			debugLog("rebased to: %s", sch.Ref.String())
+		default:
+			// skip schema expansion but rebase $ref to schema
+			sch.Ref = denormalizeRef(&rebasedRef, resolver.context.basePath, resolver.context.rootID)
 		}
 	}
 
-	if response.Schema != nil {
-		parentRefs := []string{response.Schema.Ref.String()}
-		if err := resolver.Resolve(&response.Schema.Ref, &response.Schema); err != nil {
-			return err
-		}
-		if s, err := expandSchema(*response.Schema, parentRefs, resolver); err != nil {
-			return err
-		} else {
-			*response.Schema = *s
-		}
+	if ref != nil {
+		*ref = Ref{}
 	}
-	return nil
-}
 
-func expandParameter(parameter *Parameter, resolver *schemaLoader) error {
-	if parameter == nil {
-		return nil
-	}
-	if parameter.Ref.String() != "" {
-		if err := resolver.Resolve(&parameter.Ref, parameter); err != nil {
+	// expand schema
+	if !resolver.options.SkipSchemas {
+		s, err := expandSchema(*sch, parentRefs, resolver, basePath)
+		if resolver.shouldStopOnError(err) {
 			return err
 		}
-	}
-	if parameter.Schema != nil {
-		parentRefs := []string{parameter.Schema.Ref.String()}
-		if err := resolver.Resolve(&parameter.Schema.Ref, &parameter.Schema); err != nil {
-			return err
+		if s == nil {
+			// guard for when continuing on error
+			return nil
 		}
-		if s, err := expandSchema(*parameter.Schema, parentRefs, resolver); err != nil {
-			return err
-		} else {
-			*parameter.Schema = *s
-		}
+		*sch = *s
 	}
+
 	return nil
 }

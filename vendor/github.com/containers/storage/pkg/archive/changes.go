@@ -5,9 +5,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -56,7 +56,7 @@ func (change *Change) String() string {
 	return fmt.Sprintf("%s %s", change.Kind, change.Path)
 }
 
-// for sort.Sort
+// changesByPath implements sort.Interface.
 type changesByPath []Change
 
 func (c changesByPath) Less(i, j int) bool { return c[i].Path < c[j].Path }
@@ -81,7 +81,7 @@ func sameFsTimeSpec(a, b syscall.Timespec) bool {
 // Changes walks the path rw and determines changes for the files in the path,
 // with respect to the parent layers
 func Changes(layers []string, rw string) ([]Change, error) {
-	return changes(layers, rw, aufsDeletedFile, aufsMetadataSkip)
+	return changes(layers, rw, aufsDeletedFile, aufsMetadataSkip, aufsWhiteoutPresent)
 }
 
 func aufsMetadataSkip(path string) (skip bool, err error) {
@@ -104,10 +104,40 @@ func aufsDeletedFile(root, path string, fi os.FileInfo) (string, error) {
 	return "", nil
 }
 
-type skipChange func(string) (bool, error)
-type deleteChange func(string, string, os.FileInfo) (string, error)
+func aufsWhiteoutPresent(root, path string) (bool, error) {
+	f := filepath.Join(filepath.Dir(path), WhiteoutPrefix+filepath.Base(path))
+	_, err := os.Stat(filepath.Join(root, f))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) || isENOTDIR(err) {
+		return false, nil
+	}
+	return false, err
+}
 
-func changes(layers []string, rw string, dc deleteChange, sc skipChange) ([]Change, error) {
+func isENOTDIR(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err == syscall.ENOTDIR {
+		return true
+	}
+	if perror, ok := err.(*os.PathError); ok {
+		if errno, ok := perror.Err.(syscall.Errno); ok {
+			return errno == syscall.ENOTDIR
+		}
+	}
+	return false
+}
+
+type (
+	skipChange     func(string) (bool, error)
+	deleteChange   func(string, string, os.FileInfo) (string, error)
+	whiteoutChange func(string, string) (bool, error)
+)
+
+func changes(layers []string, rw string, dc deleteChange, sc skipChange, wc whiteoutChange) ([]Change, error) {
 	var (
 		changes     []Change
 		changedDirs = make(map[string]struct{})
@@ -156,7 +186,28 @@ func changes(layers []string, rw string, dc deleteChange, sc skipChange) ([]Chan
 			change.Kind = ChangeAdd
 
 			// ...Unless it already existed in a top layer, in which case, it's a modification
+		layerScan:
 			for _, layer := range layers {
+				if wc != nil {
+					// ...Unless a lower layer also had whiteout for this directory or one of its parents,
+					// in which case, it's new
+					ignore, err := wc(layer, path)
+					if err != nil {
+						return err
+					}
+					if ignore {
+						break layerScan
+					}
+					for dir := filepath.Dir(path); dir != "" && dir != string(os.PathSeparator); dir = filepath.Dir(dir) {
+						ignore, err = wc(layer, dir)
+						if err != nil {
+							return err
+						}
+						if ignore {
+							break layerScan
+						}
+					}
+				}
 				stat, err := os.Stat(filepath.Join(layer, path))
 				if err != nil && !os.IsNotExist(err) {
 					return err
@@ -187,10 +238,15 @@ func changes(layers []string, rw string, dc deleteChange, sc skipChange) ([]Chan
 		}
 		if change.Kind == ChangeAdd || change.Kind == ChangeDelete {
 			parent := filepath.Dir(path)
-			if _, ok := changedDirs[parent]; !ok && parent != "/" {
-				changes = append(changes, Change{Path: parent, Kind: ChangeModify})
-				changedDirs[parent] = struct{}{}
+			tail := []Change{}
+			for parent != "/" {
+				if _, ok := changedDirs[parent]; !ok && parent != "/" {
+					tail = append([]Change{{Path: parent, Kind: ChangeModify}}, tail...)
+					changedDirs[parent] = struct{}{}
+				}
+				parent = filepath.Dir(parent)
 			}
+			changes = append(changes, tail...)
 		}
 
 		// Record change
@@ -206,11 +262,13 @@ func changes(layers []string, rw string, dc deleteChange, sc skipChange) ([]Chan
 // FileInfo describes the information of a file.
 type FileInfo struct {
 	parent     *FileInfo
+	idMappings *idtools.IDMappings
 	name       string
 	stat       *system.StatT
 	children   map[string]*FileInfo
 	capability []byte
 	added      bool
+	xattrs     map[string]string
 }
 
 // LookUp looks up the file information of a file.
@@ -243,7 +301,6 @@ func (info *FileInfo) path() string {
 }
 
 func (info *FileInfo) addChanges(oldInfo *FileInfo, changes *[]Change) {
-
 	sizeAtEntry := len(*changes)
 
 	if oldInfo == nil {
@@ -278,8 +335,9 @@ func (info *FileInfo) addChanges(oldInfo *FileInfo, changes *[]Change) {
 			// be visible when actually comparing the stat fields. The only time this
 			// breaks down is if some code intentionally hides a change by setting
 			// back mtime
-			if statDifferent(oldStat, newStat) ||
-				!bytes.Equal(oldChild.capability, newChild.capability) {
+			if statDifferent(oldStat, oldInfo, newStat, info) ||
+				!bytes.Equal(oldChild.capability, newChild.capability) ||
+				!reflect.DeepEqual(oldChild.xattrs, newChild.xattrs) {
 				change := Change{
 					Path: newChild.path(),
 					Kind: ChangeModify,
@@ -316,7 +374,6 @@ func (info *FileInfo) addChanges(oldInfo *FileInfo, changes *[]Change) {
 		copy((*changes)[sizeAtEntry+1:], (*changes)[sizeAtEntry:])
 		(*changes)[sizeAtEntry] = change
 	}
-
 }
 
 // Changes add changes to file information.
@@ -328,30 +385,29 @@ func (info *FileInfo) Changes(oldInfo *FileInfo) []Change {
 	return changes
 }
 
-func newRootFileInfo() *FileInfo {
+func newRootFileInfo(idMappings *idtools.IDMappings) *FileInfo {
 	// As this runs on the daemon side, file paths are OS specific.
 	root := &FileInfo{
-		name:     string(os.PathSeparator),
-		children: make(map[string]*FileInfo),
+		name:       string(os.PathSeparator),
+		idMappings: idMappings,
+		children:   make(map[string]*FileInfo),
 	}
 	return root
 }
 
 // ChangesDirs compares two directories and generates an array of Change objects describing the changes.
 // If oldDir is "", then all files in newDir will be Add-Changes.
-func ChangesDirs(newDir, oldDir string) ([]Change, error) {
-	var (
-		oldRoot, newRoot *FileInfo
-	)
+func ChangesDirs(newDir string, newMappings *idtools.IDMappings, oldDir string, oldMappings *idtools.IDMappings) ([]Change, error) {
+	var oldRoot, newRoot *FileInfo
 	if oldDir == "" {
-		emptyDir, err := ioutil.TempDir("", "empty")
+		emptyDir, err := os.MkdirTemp("", "empty")
 		if err != nil {
 			return nil, err
 		}
 		defer os.Remove(emptyDir)
 		oldDir = emptyDir
 	}
-	oldRoot, newRoot, err := collectFileInfoForChanges(oldDir, newDir)
+	oldRoot, newRoot, err := collectFileInfoForChanges(oldDir, newDir, oldMappings, newMappings)
 	if err != nil {
 		return nil, err
 	}

@@ -1,11 +1,11 @@
-// +build !windows
+//go:build !windows && !darwin
+// +build !windows,!darwin
 
 package chrootarchive
 
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 
 	"github.com/containers/storage/pkg/reexec"
@@ -14,6 +14,7 @@ import (
 func init() {
 	reexec.Register("storage-applyLayer", applyLayer)
 	reexec.Register("storage-untar", untar)
+	reexec.Register("storage-tar", tar)
 }
 
 func fatal(err error) {
@@ -24,5 +25,5 @@ func fatal(err error) {
 // flush consumes all the bytes from the reader discarding
 // any errors
 func flush(r io.Reader) (bytes int64, err error) {
-	return io.Copy(ioutil.Discard, r)
+	return io.Copy(io.Discard, r)
 }

@@ -16,6 +16,7 @@ package spec
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/go-openapi/jsonpointer"
@@ -40,6 +41,24 @@ func (e Extensions) GetString(key string) (string, bool) {
 	return "", false
 }
 
+// GetInt gets a int value from the extensions
+func (e Extensions) GetInt(key string) (int, bool) {
+	realKey := strings.ToLower(key)
+
+	if v, ok := e.GetString(realKey); ok {
+		if r, err := strconv.Atoi(v); err == nil {
+			return r, true
+		}
+	}
+
+	if v, ok := e[realKey]; ok {
+		if r, rOk := v.(float64); rOk {
+			return int(r), true
+		}
+	}
+	return -1, false
+}
+
 // GetBool gets a string value from the extensions
 func (e Extensions) GetBool(key string) (bool, bool) {
 	if v, ok := e[strings.ToLower(key)]; ok {
@@ -52,14 +71,14 @@ func (e Extensions) GetBool(key string) (bool, bool) {
 // GetStringSlice gets a string value from the extensions
 func (e Extensions) GetStringSlice(key string) ([]string, bool) {
 	if v, ok := e[strings.ToLower(key)]; ok {
-		arr, ok := v.([]interface{})
-		if !ok {
+		arr, isSlice := v.([]interface{})
+		if !isSlice {
 			return nil, false
 		}
 		var strs []string
 		for _, iface := range arr {
-			str, ok := iface.(string)
-			if !ok {
+			str, isString := iface.(string)
+			if !isString {
 				return nil, false
 			}
 			strs = append(strs, str)
@@ -161,8 +180,5 @@ func (i *Info) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &i.InfoProps); err != nil {
 		return err
 	}
-	if err := json.Unmarshal(data, &i.VendorExtensible); err != nil {
-		return err
-	}
-	return nil
+	return json.Unmarshal(data, &i.VendorExtensible)
 }

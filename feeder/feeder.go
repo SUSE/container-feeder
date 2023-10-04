@@ -29,7 +29,7 @@ import (
 
 	"github.com/containers/image/docker/reference"
 
-	wlk "github.com/kubic-project/container-feeder/walker"
+	wlk "github.com/SUSE/container-feeder/walker"
 	log "github.com/sirupsen/logrus"
 )
 

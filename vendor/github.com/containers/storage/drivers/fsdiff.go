@@ -2,20 +2,21 @@ package graphdriver
 
 import (
 	"io"
+	"os"
+	"runtime"
 	"time"
 
 	"github.com/containers/storage/pkg/archive"
 	"github.com/containers/storage/pkg/chrootarchive"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/ioutils"
+	"github.com/containers/storage/pkg/unshare"
 	"github.com/sirupsen/logrus"
 )
 
-var (
-	// ApplyUncompressedLayer defines the unpack method used by the graph
-	// driver.
-	ApplyUncompressedLayer = chrootarchive.ApplyUncompressedLayer
-)
+// ApplyUncompressedLayer defines the unpack method used by the graph
+// driver.
+var ApplyUncompressedLayer = chrootarchive.ApplyUncompressedLayer
 
 // NaiveDiffDriver takes a ProtoDriver and adds the
 // capability of the Diffing methods which it may or may not
@@ -24,123 +25,172 @@ var (
 // Notably, the AUFS driver doesn't need to be wrapped like this.
 type NaiveDiffDriver struct {
 	ProtoDriver
-	uidMaps []idtools.IDMap
-	gidMaps []idtools.IDMap
+	LayerIDMapUpdater
 }
 
 // NewNaiveDiffDriver returns a fully functional driver that wraps the
 // given ProtoDriver and adds the capability of the following methods which
 // it may or may not support on its own:
-//     Diff(id, parent, mountLabel string) (io.ReadCloser, error)
-//     Changes(id, parent, mountLabel string) ([]archive.Change, error)
-//     ApplyDiff(id, parent, mountLabel string, diff io.Reader) (size int64, err error)
-//     DiffSize(id, parent, mountLabel string) (size int64, err error)
-func NewNaiveDiffDriver(driver ProtoDriver, uidMaps, gidMaps []idtools.IDMap) Driver {
-	return &NaiveDiffDriver{ProtoDriver: driver,
-		uidMaps: uidMaps,
-		gidMaps: gidMaps}
+//
+//	Diff(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (io.ReadCloser, error)
+//	Changes(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) ([]archive.Change, error)
+//	ApplyDiff(id, parent string, options ApplyDiffOpts) (size int64, err error)
+//	DiffSize(id string, idMappings *idtools.IDMappings, parent, parentMappings *idtools.IDMappings, mountLabel string) (size int64, err error)
+func NewNaiveDiffDriver(driver ProtoDriver, updater LayerIDMapUpdater) Driver {
+	return &NaiveDiffDriver{ProtoDriver: driver, LayerIDMapUpdater: updater}
 }
 
 // Diff produces an archive of the changes between the specified
 // layer and its parent layer which may be "".
-func (gdw *NaiveDiffDriver) Diff(id, parent, mountLabel string) (arch io.ReadCloser, err error) {
+func (gdw *NaiveDiffDriver) Diff(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (arch io.ReadCloser, err error) {
 	startTime := time.Now()
 	driver := gdw.ProtoDriver
 
-	layerFs, err := driver.Get(id, mountLabel)
+	if idMappings == nil {
+		idMappings = &idtools.IDMappings{}
+	}
+	if parentMappings == nil {
+		parentMappings = &idtools.IDMappings{}
+	}
+
+	options := MountOpts{
+		MountLabel: mountLabel,
+		Options:    []string{"ro"},
+	}
+	layerFs, err := driver.Get(id, options)
 	if err != nil {
 		return nil, err
 	}
 
 	defer func() {
 		if err != nil {
-			driver.Put(id)
+			driverPut(driver, id, &err)
 		}
 	}()
 
 	if parent == "" {
-		archive, err := archive.Tar(layerFs, archive.Uncompressed)
+		archive, err := archive.TarWithOptions(layerFs, &archive.TarOptions{
+			Compression: archive.Uncompressed,
+			UIDMaps:     idMappings.UIDs(),
+			GIDMaps:     idMappings.GIDs(),
+		})
 		if err != nil {
 			return nil, err
 		}
 		return ioutils.NewReadCloserWrapper(archive, func() error {
 			err := archive.Close()
-			driver.Put(id)
+			driverPut(driver, id, &err)
 			return err
 		}), nil
 	}
 
-	parentFs, err := driver.Get(parent, mountLabel)
+	options.Options = append(options.Options, "ro")
+	parentFs, err := driver.Get(parent, options)
 	if err != nil {
 		return nil, err
 	}
-	defer driver.Put(parent)
+	defer driverPut(driver, parent, &err)
 
-	changes, err := archive.ChangesDirs(layerFs, parentFs)
+	changes, err := archive.ChangesDirs(layerFs, idMappings, parentFs, parentMappings)
 	if err != nil {
 		return nil, err
 	}
 
-	archive, err := archive.ExportChanges(layerFs, changes, gdw.uidMaps, gdw.gidMaps)
+	archive, err := archive.ExportChanges(layerFs, changes, idMappings.UIDs(), idMappings.GIDs())
 	if err != nil {
 		return nil, err
 	}
 
 	return ioutils.NewReadCloserWrapper(archive, func() error {
 		err := archive.Close()
-		driver.Put(id)
+		driverPut(driver, id, &err)
 
 		// NaiveDiffDriver compares file metadata with parent layers. Parent layers
 		// are extracted from tar's with full second precision on modified time.
 		// We need this hack here to make sure calls within same second receive
 		// correct result.
-		time.Sleep(startTime.Truncate(time.Second).Add(time.Second).Sub(time.Now()))
+		time.Sleep(time.Until(startTime.Truncate(time.Second).Add(time.Second)))
 		return err
 	}), nil
 }
 
 // Changes produces a list of changes between the specified layer
 // and its parent layer. If parent is "", then all changes will be ADD changes.
-func (gdw *NaiveDiffDriver) Changes(id, parent, mountLabel string) ([]archive.Change, error) {
+func (gdw *NaiveDiffDriver) Changes(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (_ []archive.Change, retErr error) {
 	driver := gdw.ProtoDriver
 
-	layerFs, err := driver.Get(id, mountLabel)
+	if idMappings == nil {
+		idMappings = &idtools.IDMappings{}
+	}
+	if parentMappings == nil {
+		parentMappings = &idtools.IDMappings{}
+	}
+
+	options := MountOpts{
+		MountLabel: mountLabel,
+	}
+	layerFs, err := driver.Get(id, options)
 	if err != nil {
 		return nil, err
 	}
-	defer driver.Put(id)
+	defer driverPut(driver, id, &retErr)
 
 	parentFs := ""
 
 	if parent != "" {
-		parentFs, err = driver.Get(parent, mountLabel)
+		options := MountOpts{
+			MountLabel: mountLabel,
+			Options:    []string{"ro"},
+		}
+		parentFs, err = driver.Get(parent, options)
 		if err != nil {
 			return nil, err
 		}
-		defer driver.Put(parent)
+		defer driverPut(driver, parent, &retErr)
 	}
 
-	return archive.ChangesDirs(layerFs, parentFs)
+	return archive.ChangesDirs(layerFs, idMappings, parentFs, parentMappings)
 }
 
 // ApplyDiff extracts the changeset from the given diff into the
 // layer with the specified id and parent, returning the size of the
 // new layer in bytes.
-func (gdw *NaiveDiffDriver) ApplyDiff(id, parent, mountLabel string, diff io.Reader) (size int64, err error) {
+func (gdw *NaiveDiffDriver) ApplyDiff(id, parent string, options ApplyDiffOpts) (size int64, err error) {
 	driver := gdw.ProtoDriver
 
+	if options.Mappings == nil {
+		options.Mappings = &idtools.IDMappings{}
+	}
+
 	// Mount the root filesystem so we can apply the diff/layer.
-	layerFs, err := driver.Get(id, mountLabel)
+	mountOpts := MountOpts{
+		MountLabel: options.MountLabel,
+	}
+	layerFs, err := driver.Get(id, mountOpts)
 	if err != nil {
 		return
 	}
-	defer driver.Put(id)
+	defer driverPut(driver, id, &err)
 
-	options := &archive.TarOptions{UIDMaps: gdw.uidMaps,
-		GIDMaps: gdw.gidMaps}
+	defaultForceMask := os.FileMode(0o700)
+	var forceMask *os.FileMode // = nil
+	if runtime.GOOS == "darwin" {
+		forceMask = &defaultForceMask
+	}
+
+	tarOptions := &archive.TarOptions{
+		InUserNS:          unshare.IsRootless(),
+		IgnoreChownErrors: options.IgnoreChownErrors,
+		ForceMask:         forceMask,
+	}
+	if options.Mappings != nil {
+		tarOptions.UIDMaps = options.Mappings.UIDs()
+		tarOptions.GIDMaps = options.Mappings.GIDs()
+	}
 	start := time.Now().UTC()
 	logrus.Debug("Start untar layer")
-	if size, err = ApplyUncompressedLayer(layerFs, diff, options); err != nil {
+	if size, err = ApplyUncompressedLayer(layerFs, options.Diff, tarOptions); err != nil {
+		logrus.Errorf("While applying layer: %s", err)
 		return
 	}
 	logrus.Debugf("Untar time: %vs", time.Now().UTC().Sub(start).Seconds())
@@ -151,19 +201,29 @@ func (gdw *NaiveDiffDriver) ApplyDiff(id, parent, mountLabel string, diff io.Rea
 // DiffSize calculates the changes between the specified layer
 // and its parent and returns the size in bytes of the changes
 // relative to its base filesystem directory.
-func (gdw *NaiveDiffDriver) DiffSize(id, parent, mountLabel string) (size int64, err error) {
+func (gdw *NaiveDiffDriver) DiffSize(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (size int64, err error) {
 	driver := gdw.ProtoDriver
 
-	changes, err := gdw.Changes(id, parent, mountLabel)
+	if idMappings == nil {
+		idMappings = &idtools.IDMappings{}
+	}
+	if parentMappings == nil {
+		parentMappings = &idtools.IDMappings{}
+	}
+
+	changes, err := gdw.Changes(id, idMappings, parent, parentMappings, mountLabel)
 	if err != nil {
 		return
 	}
 
-	layerFs, err := driver.Get(id, mountLabel)
+	options := MountOpts{
+		MountLabel: mountLabel,
+	}
+	layerFs, err := driver.Get(id, options)
 	if err != nil {
 		return
 	}
-	defer driver.Put(id)
+	defer driverPut(driver, id, &err)
 
 	return archive.ChangesSize(layerFs, changes), nil
 }

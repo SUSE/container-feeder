@@ -1,49 +1,48 @@
-// +build freebsd,cgo
-
 package mount
 
-/*
-#include <sys/mount.h>
-*/
-import "C"
+import (
+	"golang.org/x/sys/unix"
+)
 
 const (
-	// RDONLY will mount the filesystem as read-only.
-	RDONLY = C.MNT_RDONLY
+	// RDONLY will mount the file system read-only.
+	RDONLY = unix.MNT_RDONLY
 
 	// NOSUID will not allow set-user-identifier or set-group-identifier bits to
 	// take effect.
-	NOSUID = C.MNT_NOSUID
+	NOSUID = unix.MNT_NOSUID
 
 	// NOEXEC will not allow execution of any binaries on the mounted file system.
-	NOEXEC = C.MNT_NOEXEC
+	NOEXEC = unix.MNT_NOEXEC
 
-	// SYNCHRONOUS will allow any I/O to the file system to be done synchronously.
-	SYNCHRONOUS = C.MNT_SYNCHRONOUS
+	// SYNCHRONOUS will allow I/O to the file system to be done synchronously.
+	SYNCHRONOUS = unix.MNT_SYNCHRONOUS
+
+	// REMOUNT will attempt to remount an already-mounted file system. This is
+	// commonly used to change the mount flags for a file system, especially to
+	// make a readonly file system writeable. It does not change device or mount
+	// point.
+	REMOUNT = unix.MNT_UPDATE
 
 	// NOATIME will not update the file access time when reading from a file.
-	NOATIME = C.MNT_NOATIME
-)
+	NOATIME = unix.MNT_NOATIME
 
-// These flags are unsupported.
-const (
-	BIND        = 0
+	mntDetach = unix.MNT_FORCE
+
+	NODIRATIME  = 0
+	NODEV       = 0
 	DIRSYNC     = 0
 	MANDLOCK    = 0
-	NODEV       = 0
-	NODIRATIME  = 0
+	BIND        = 0
+	RBIND       = 0
 	UNBINDABLE  = 0
 	RUNBINDABLE = 0
 	PRIVATE     = 0
 	RPRIVATE    = 0
-	SHARED      = 0
-	RSHARED     = 0
 	SLAVE       = 0
 	RSLAVE      = 0
-	RBIND       = 0
-	RELATIVE    = 0
+	SHARED      = 0
+	RSHARED     = 0
 	RELATIME    = 0
-	REMOUNT     = 0
 	STRICTATIME = 0
-	mntDetach   = 0
 )

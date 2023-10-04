@@ -13,7 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// PatternMatcher allows checking paths agaist a list of patterns
+// PatternMatcher allows checking paths against a list of patterns
 type PatternMatcher struct {
 	patterns   []*Pattern
 	exclusions bool
@@ -38,7 +38,7 @@ func NewPatternMatcher(patterns []string) (*PatternMatcher, error) {
 				return nil, errors.New("illegal exclusion pattern: \"!\"")
 			}
 			newp.exclusion = true
-			p = p[1:]
+			p = strings.TrimPrefix(filepath.Clean(p[1:]), "/")
 			pm.exclusions = true
 		}
 		// Do some syntax checking on the pattern.
@@ -57,13 +57,12 @@ func NewPatternMatcher(patterns []string) (*PatternMatcher, error) {
 	return pm, nil
 }
 
+// Deprecated: Please use the `MatchesResult` method instead.
 // Matches matches path against all the patterns. Matches is not safe to be
 // called concurrently
 func (pm *PatternMatcher) Matches(file string) (bool, error) {
 	matched := false
 	file = filepath.FromSlash(file)
-	parentPath := filepath.Dir(file)
-	parentPathDirs := strings.Split(parentPath, string(os.PathSeparator))
 
 	for _, pattern := range pm.patterns {
 		negative := false
@@ -75,13 +74,6 @@ func (pm *PatternMatcher) Matches(file string) (bool, error) {
 		match, err := pattern.match(file)
 		if err != nil {
 			return false, err
-		}
-
-		if !match && parentPath != "." {
-			// Check to see if the pattern matches one of our parent dirs.
-			if len(pattern.dirs) <= len(parentPathDirs) {
-				match, _ = pattern.match(strings.Join(parentPathDirs[:len(pattern.dirs)], string(os.PathSeparator)))
-			}
 		}
 
 		if match {
@@ -96,6 +88,73 @@ func (pm *PatternMatcher) Matches(file string) (bool, error) {
 	return matched, nil
 }
 
+type MatchResult struct {
+	isMatched         bool
+	matches, excludes uint
+}
+
+// Excludes returns true if the overall result is matched
+func (m *MatchResult) IsMatched() bool {
+	return m.isMatched
+}
+
+// Excludes returns the amount of matches of an MatchResult
+func (m *MatchResult) Matches() uint {
+	return m.matches
+}
+
+// Excludes returns the amount of excludes of an MatchResult
+func (m *MatchResult) Excludes() uint {
+	return m.excludes
+}
+
+// MatchesResult verifies the provided filepath against all patterns.
+// It returns the `*MatchResult` result for the patterns on success, otherwise
+// an error. This method is not safe to be called concurrently.
+func (pm *PatternMatcher) MatchesResult(file string) (res *MatchResult, err error) {
+	file = filepath.FromSlash(file)
+	res = &MatchResult{false, 0, 0}
+
+	for _, pattern := range pm.patterns {
+		negative := false
+
+		if pattern.exclusion {
+			negative = true
+		}
+
+		match, err := pattern.match(file)
+		if err != nil {
+			return nil, err
+		}
+
+		if match {
+			res.isMatched = !negative
+			if negative {
+				res.excludes++
+			} else {
+				res.matches++
+			}
+		}
+	}
+
+	if res.matches > 0 {
+		logrus.Debugf("Skipping excluded path: %s", file)
+	}
+
+	return res, nil
+}
+
+// IsMatch verifies the provided filepath against all patterns and returns true
+// if it matches. A match is valid if the last match is a positive one.
+// It returns an error on failure and is not safe to be called concurrently.
+func (pm *PatternMatcher) IsMatch(file string) (matched bool, err error) {
+	res, err := pm.MatchesResult(file)
+	if err != nil {
+		return false, err
+	}
+	return res.isMatched, nil
+}
+
 // Exclusions returns true if any of the patterns define exclusions
 func (pm *PatternMatcher) Exclusions() bool {
 	return pm.exclusions
@@ -106,7 +165,7 @@ func (pm *PatternMatcher) Patterns() []*Pattern {
 	return pm.patterns
 }
 
-// Pattern defines a single regexp used used to filter file paths.
+// Pattern defines a single regexp used to filter file paths.
 type Pattern struct {
 	cleanedPattern string
 	dirs           []string
@@ -124,7 +183,6 @@ func (p *Pattern) Exclusion() bool {
 }
 
 func (p *Pattern) match(path string) (bool, error) {
-
 	if p.regexp == nil {
 		if err := p.compile(); err != nil {
 			return false, filepath.ErrBadPattern
@@ -146,8 +204,9 @@ func (p *Pattern) compile() error {
 
 	sl := string(os.PathSeparator)
 	escSL := sl
-	if sl == `\` {
-		escSL += `\`
+	const bs = `\`
+	if sl == bs {
+		escSL += bs
 	}
 
 	for scan.Peek() != scanner.EOF {
@@ -182,11 +241,10 @@ func (p *Pattern) compile() error {
 		} else if ch == '.' || ch == '$' {
 			// Escape some regexp special chars that have no meaning
 			// in golang's filepath.Match
-			regStr += `\` + string(ch)
+			regStr += bs + string(ch)
 		} else if ch == '\\' {
-			// escape next char. Note that a trailing \ in the pattern
-			// will be left alone (but need to escape it)
-			if sl == `\` {
+			// escape next char.
+			if sl == bs {
 				// On windows map "\" to "\\", meaning an escaped backslash,
 				// and then just continue because filepath.Match on
 				// Windows doesn't allow escaping at all
@@ -194,16 +252,16 @@ func (p *Pattern) compile() error {
 				continue
 			}
 			if scan.Peek() != scanner.EOF {
-				regStr += `\` + string(scan.Next())
+				regStr += bs + string(scan.Next())
 			} else {
-				regStr += `\`
+				return filepath.ErrBadPattern
 			}
 		} else {
 			regStr += string(ch)
 		}
 	}
 
-	regStr += "$"
+	regStr += "(" + escSL + ".*)?$"
 
 	re, err := regexp.Compile(regStr)
 	if err != nil {
@@ -228,7 +286,7 @@ func Matches(file string, patterns []string) (bool, error) {
 		return false, nil
 	}
 
-	return pm.Matches(file)
+	return pm.IsMatch(file)
 }
 
 // CopyFile copies from src to dst until either EOF is reached
@@ -262,17 +320,32 @@ func ReadSymlinkedDirectory(path string) (string, error) {
 	var realPath string
 	var err error
 	if realPath, err = filepath.Abs(path); err != nil {
-		return "", fmt.Errorf("unable to get absolute path for %s: %s", path, err)
+		return "", fmt.Errorf("unable to get absolute path for %s: %w", path, err)
 	}
 	if realPath, err = filepath.EvalSymlinks(realPath); err != nil {
-		return "", fmt.Errorf("failed to canonicalise path for %s: %s", path, err)
+		return "", fmt.Errorf("failed to canonicalise path for %s: %w", path, err)
 	}
 	realPathInfo, err := os.Stat(realPath)
 	if err != nil {
-		return "", fmt.Errorf("failed to stat target '%s' of '%s': %s", realPath, path, err)
+		return "", fmt.Errorf("failed to stat target '%s' of '%s': %w", realPath, path, err)
 	}
 	if !realPathInfo.Mode().IsDir() {
 		return "", fmt.Errorf("canonical path points to a file '%s'", realPath)
+	}
+	return realPath, nil
+}
+
+// ReadSymlinkedPath returns the target directory of a symlink.
+// The target of the symbolic link can be a file and a directory.
+func ReadSymlinkedPath(path string) (realPath string, err error) {
+	if realPath, err = filepath.Abs(path); err != nil {
+		return "", fmt.Errorf("unable to get absolute path for %q: %w", path, err)
+	}
+	if realPath, err = filepath.EvalSymlinks(realPath); err != nil {
+		return "", fmt.Errorf("failed to canonicalise path for %q: %w", path, err)
+	}
+	if _, err := os.Stat(realPath); err != nil {
+		return "", fmt.Errorf("failed to stat target %q of %q: %w", realPath, path, err)
 	}
 	return realPath, nil
 }
@@ -282,12 +355,12 @@ func CreateIfNotExists(path string, isDir bool) error {
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			if isDir {
-				return os.MkdirAll(path, 0755)
+				return os.MkdirAll(path, 0o755)
 			}
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(path, os.O_CREATE, 0755)
+			f, err := os.OpenFile(path, os.O_CREATE, 0o755)
 			if err != nil {
 				return err
 			}

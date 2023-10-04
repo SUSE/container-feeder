@@ -1,3 +1,6 @@
+//go:build linux && cgo
+// +build linux,cgo
+
 package devmapper
 
 // Definition of struct dm_task and sub structures (from lvm2)
