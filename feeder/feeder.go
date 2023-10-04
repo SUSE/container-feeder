@@ -217,7 +217,7 @@ func Import(path string) (FeederLoadResponse, error) {
 	return res, nil
 }
 
-//normalizeNameTag split the image into it's name and tag.
+// normalizeNameTag split the image into it's name and tag.
 func normalizeNameTag(image string) (string, string, error) {
 	// Remove illegal characters when image is "<none>:<none>"
 	re := regexp.MustCompile(`<|>`)
@@ -257,7 +257,7 @@ func isWhitelisted(image string, whitelist []string) (bool, error) {
 
 // shouldImportImage will check if any tag under newTags is not inside oldTags.
 // If any tag is found that matches this condition, we should import the image.
-func (f *Feeder) shouldImportImage(oldTags, newTags []string) (bool) {
+func (f *Feeder) shouldImportImage(oldTags, newTags []string) bool {
 	for _, newTag := range newTags {
 		if !stringInSlice(newTag, oldTags) {
 			return true
