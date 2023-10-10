@@ -186,7 +186,7 @@ func Import(path string) (FeederLoadResponse, error) {
 
 	log.Debugf("Images to import: %v", imagesToImport)
 	for tag, file := range imagesToImport {
-		_, err := f.feeder.LoadImage(file)
+		loadedName, err := f.feeder.LoadImage(file)
 		if err != nil {
 			log.Warnf("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
@@ -196,7 +196,7 @@ func Import(path string) (FeederLoadResponse, error) {
 					Error: err,
 				})
 		} else {
-			err = f.feeder.TagImage(tag, imagesToImportTags[tag])
+			err = f.feeder.TagImage(loadedName, imagesToImportTags[tag])
 			if err != nil {
 				log.Warnf("Could not tag image %s: %v", file, err)
 				res.FailedImports = append(
