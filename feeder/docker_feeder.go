@@ -20,7 +20,7 @@ package feeder
 import (
 	"context"
 	"errors"
-	"io/ioutil"
+	"io"
 	"os"
 	"strings"
 
@@ -128,7 +128,7 @@ func (f *DockerFeeder) LoadImage(pathToImage string) (string, error) {
 		return "", err
 	}
 	defer ret.Body.Close()
-	b, err := ioutil.ReadAll(ret.Body)
+	b, err := io.ReadAll(ret.Body)
 	if err != nil {
 		return "", err
 	}

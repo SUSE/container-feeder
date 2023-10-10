@@ -2,7 +2,6 @@ package walker
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -10,7 +9,7 @@ import (
 )
 
 func TestWalkerFailVerificationFileNotManagedByRPM(t *testing.T) {
-	topDir, err := ioutil.TempDir("", "test-walker")
+	topDir, err := os.MkdirTemp("", "test-walker")
 	if err != nil {
 		t.Errorf("error while creating test dir: %v", err)
 	}
@@ -55,14 +54,14 @@ func TestWalkerWithVerificationEnabled(t *testing.T) {
 }
 
 func TestWalker(t *testing.T) {
-	topDir, err := ioutil.TempDir("", "test-walker")
+	topDir, err := os.MkdirTemp("", "test-walker")
 	if err != nil {
 		t.Errorf("error while creating test dir: %v", err)
 	}
 	// cleanup dir
 	defer os.RemoveAll(topDir)
 
-	subDir, err := ioutil.TempDir(topDir, "sub")
+	subDir, err := os.MkdirTemp(topDir, "sub")
 	if err != nil {
 		t.Errorf("error while creating sub dir: %v", err)
 	}

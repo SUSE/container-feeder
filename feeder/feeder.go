@@ -20,7 +20,6 @@ package feeder
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,7 +59,7 @@ func parseWhitelist(whitelist []string) ([]string, error) {
 func loadConfig() (FeederConfig, error) {
 	config := FeederConfig{}
 
-	file, err := ioutil.ReadFile(configFile)
+	file, err := os.ReadFile(configFile)
 	if err != nil {
 		return config, err
 	}
@@ -348,7 +347,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 // file shipped by RPM
 // Returns repotag (`<name>:<tag>`), a list of additional tags, and image name
 func repotagFromRPMFile(file string) (string, []string, string, error) {
-	data, err := ioutil.ReadFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return "", nil, "", err
 	}
