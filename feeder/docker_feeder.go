@@ -19,6 +19,7 @@ package feeder
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -114,6 +115,10 @@ func (f *DockerFeeder) Images() ([]string, error) {
 	return tags, nil
 }
 
+type loadResponse struct {
+	Stream string `json:stream`
+}
+
 // LoadImage loads the specified image into docker. Returns the image name
 // loaded into the docker daemon.
 func (f *DockerFeeder) LoadImage(pathToImage string) (string, error) {
@@ -133,7 +138,13 @@ func (f *DockerFeeder) LoadImage(pathToImage string) (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(strings.TrimPrefix(string(b[:]), "Loaded image:")), nil
+	loadResp := loadResponse{}
+	err = json.Unmarshal(b, &loadResp)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(strings.TrimPrefix(string(loadResp.Stream), "Loaded image:")), nil
 }
 
 // TagImage tags the specified docker image with the supplied tags.
