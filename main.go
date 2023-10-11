@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kubic-project/container-feeder/feeder"
+	"github.com/SUSE/container-feeder/feeder"
 	log "github.com/sirupsen/logrus"
 )
 

@@ -3,6 +3,12 @@
 // license that can be found in the LICENSE file.
 
 // Package openpgp implements high level operations on OpenPGP messages.
+//
+// Deprecated: this package is unmaintained except for security fixes. New
+// applications should consider a more focused, modern alternative to OpenPGP
+// for their specific task. If you are required to interoperate with OpenPGP
+// systems and need a maintained package, consider a community fork.
+// See https://golang.org/issue/44226.
 package openpgp // import "golang.org/x/crypto/openpgp"
 
 import (
@@ -50,7 +56,7 @@ type MessageDetails struct {
 	// If IsSigned is true and SignedBy is non-zero then the signature will
 	// be verified as UnverifiedBody is read. The signature cannot be
 	// checked until the whole of UnverifiedBody is read so UnverifiedBody
-	// must be consumed until EOF before the data can trusted. Even if a
+	// must be consumed until EOF before the data can be trusted. Even if a
 	// message isn't signed (or the signer is unknown) the data may contain
 	// an authentication code that is only checked once UnverifiedBody has
 	// been consumed. Once EOF has been seen, the following fields are

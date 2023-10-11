@@ -1,29 +1,32 @@
+//go:build !linux
 // +build !linux
 
 package archive
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
+	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/system"
 )
 
-func collectFileInfoForChanges(oldDir, newDir string) (*FileInfo, *FileInfo, error) {
+func collectFileInfoForChanges(oldDir, newDir string, oldIDMap, newIDMap *idtools.IDMappings) (*FileInfo, *FileInfo, error) {
 	var (
 		oldRoot, newRoot *FileInfo
 		err1, err2       error
 		errs             = make(chan error, 2)
 	)
 	go func() {
-		oldRoot, err1 = collectFileInfo(oldDir)
+		oldRoot, err1 = collectFileInfo(oldDir, oldIDMap)
 		errs <- err1
 	}()
 	go func() {
-		newRoot, err2 = collectFileInfo(newDir)
+		newRoot, err2 = collectFileInfo(newDir, newIDMap)
 		errs <- err2
 	}()
 
@@ -37,10 +40,15 @@ func collectFileInfoForChanges(oldDir, newDir string) (*FileInfo, *FileInfo, err
 	return oldRoot, newRoot, nil
 }
 
-func collectFileInfo(sourceDir string) (*FileInfo, error) {
-	root := newRootFileInfo()
+func collectFileInfo(sourceDir string, idMappings *idtools.IDMappings) (*FileInfo, error) {
+	root := newRootFileInfo(idMappings)
 
-	err := filepath.Walk(sourceDir, func(path string, f os.FileInfo, err error) error {
+	sourceStat, err := system.Lstat(sourceDir)
+	if err != nil {
+		return nil, err
+	}
+
+	err = filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -73,17 +81,25 @@ func collectFileInfo(sourceDir string) (*FileInfo, error) {
 		}
 
 		info := &FileInfo{
-			name:     filepath.Base(relPath),
-			children: make(map[string]*FileInfo),
-			parent:   parent,
+			name:       filepath.Base(relPath),
+			children:   make(map[string]*FileInfo),
+			parent:     parent,
+			idMappings: idMappings,
 		}
 
 		s, err := system.Lstat(path)
 		if err != nil {
 			return err
 		}
-		info.stat = s
 
+		// Don't cross mount points. This ignores file mounts to avoid
+		// generating a diff which deletes all files following the
+		// mount.
+		if s.Dev() != sourceStat.Dev() && s.IsDir() {
+			return filepath.SkipDir
+		}
+
+		info.stat = s
 		info.capability, _ = system.Lgetxattr(path, "security.capability")
 
 		parent.children[info.name] = info

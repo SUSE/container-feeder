@@ -1,4 +1,5 @@
-// +build !exclude_graphdriver_devicemapper,linux
+//go:build !exclude_graphdriver_devicemapper && linux && cgo
+// +build !exclude_graphdriver_devicemapper,linux,cgo
 
 package register
 

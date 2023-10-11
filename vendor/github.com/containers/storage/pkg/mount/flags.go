@@ -99,7 +99,7 @@ func MergeTmpfsOptions(options []string) ([]string, error) {
 		}
 		opt := strings.SplitN(option, "=", 2)
 		if len(opt) != 2 || !validFlags[opt[0]] {
-			return nil, fmt.Errorf("Invalid tmpfs option %q", opt)
+			return nil, fmt.Errorf("invalid tmpfs option %q", opt)
 		}
 		if !dataCollisions[opt[0]] {
 			// We prepend the option and add to collision map
@@ -111,9 +111,9 @@ func MergeTmpfsOptions(options []string) ([]string, error) {
 	return newOptions, nil
 }
 
-// Parse fstab type mount options into mount() flags
+// ParseOptions parses fstab type mount options into mount() flags
 // and device specific data
-func parseOptions(options string) (int, string) {
+func ParseOptions(options string) (int, string) {
 	var (
 		flag int
 		data []string
@@ -138,11 +138,11 @@ func parseOptions(options string) (int, string) {
 
 // ParseTmpfsOptions parse fstab type mount options into flags and data
 func ParseTmpfsOptions(options string) (int, string, error) {
-	flags, data := parseOptions(options)
+	flags, data := ParseOptions(options)
 	for _, o := range strings.Split(data, ",") {
 		opt := strings.SplitN(o, "=", 2)
 		if !validFlags[opt[0]] {
-			return 0, "", fmt.Errorf("Invalid tmpfs option %q", opt)
+			return 0, "", fmt.Errorf("invalid tmpfs option %q", opt)
 		}
 	}
 	return flags, data, nil

@@ -1,3 +1,4 @@
+//go:build windows
 // +build windows
 
 package kernel
@@ -23,7 +24,6 @@ func (k *VersionInfo) String() string {
 
 // GetKernelVersion gets the current kernel version.
 func GetKernelVersion() (*VersionInfo, error) {
-
 	var (
 		h         windows.Handle
 		dwVersion uint32
@@ -63,7 +63,7 @@ func GetKernelVersion() (*VersionInfo, error) {
 	}
 
 	KVI.major = int(dwVersion & 0xFF)
-	KVI.minor = int((dwVersion & 0XFF00) >> 8)
+	KVI.minor = int((dwVersion & 0xFF00) >> 8)
 	KVI.build = int((dwVersion & 0xFFFF0000) >> 16)
 
 	return KVI, nil

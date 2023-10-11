@@ -4,12 +4,10 @@ import (
 	"archive/tar"
 	"errors"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/storage/pkg/system"
 	"github.com/sirupsen/logrus"
 )
 
@@ -198,7 +196,7 @@ func CopyInfoDestinationPath(path string) (info CopyInfo, err error) {
 			return CopyInfo{}, err
 		}
 
-		if !system.IsAbs(linkTarget) {
+		if !filepath.IsAbs(linkTarget) {
 			// Join with the parent directory.
 			dstParent, _ := SplitPathDirEntry(path)
 			linkTarget = filepath.Join(dstParent, linkTarget)
@@ -256,7 +254,7 @@ func PrepareArchiveCopy(srcContent io.Reader, srcInfo, dstInfo CopyInfo) (dstDir
 		// The destination exists as a directory. No alteration
 		// to srcContent is needed as its contents can be
 		// simply extracted to the destination directory.
-		return dstInfo.Path, ioutil.NopCloser(srcContent), nil
+		return dstInfo.Path, io.NopCloser(srcContent), nil
 	case dstInfo.Exists && srcInfo.IsDir:
 		// The destination exists as some type of file and the source
 		// content is a directory. This is an error condition since
@@ -299,7 +297,6 @@ func PrepareArchiveCopy(srcContent io.Reader, srcInfo, dstInfo CopyInfo) (dstDir
 		}
 		return dstDir, RebaseArchiveEntries(srcContent, srcBase, dstBase), nil
 	}
-
 }
 
 // RebaseArchiveEntries rewrites the given srcContent archive replacing

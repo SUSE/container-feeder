@@ -1,3 +1,4 @@
+//go:build linux && cgo
 // +build linux,cgo
 
 package devicemapper
@@ -12,7 +13,7 @@ import (
 )
 
 // DevmapperLogger defines methods required to register as a callback for
-// logging events recieved from devicemapper. Note that devicemapper will send
+// logging events received from devicemapper. Note that devicemapper will send
 // *all* logs regardless to callbacks (including debug logs) so it's
 // recommended to not spam the console with the outputs.
 type DevmapperLogger interface {
@@ -38,6 +39,7 @@ func LogInit(logger DevmapperLogger) {
 // because we are using callbacks, this function will be called for *every* log
 // in libdm (even debug ones because there's no way of setting the verbosity
 // level for an external logging callback).
+//
 //export StorageDevmapperLogCallback
 func StorageDevmapperLogCallback(level C.int, file *C.char, line, dmErrnoOrClass C.int, message *C.char) {
 	msg := C.GoString(message)

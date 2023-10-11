@@ -1,10 +1,12 @@
+//go:build linux
 // +build linux
 
 package overlayutils
 
 import (
-	"errors"
 	"fmt"
+
+	graphdriver "github.com/containers/storage/drivers"
 )
 
 // ErrDTypeNotSupported denotes that the backing filesystem doesn't support d_type.
@@ -14,5 +16,5 @@ func ErrDTypeNotSupported(driver, backingFs string) error {
 		msg += " Reformat the filesystem with ftype=1 to enable d_type support."
 	}
 	msg += " Running without d_type is not supported."
-	return errors.New(msg)
+	return fmt.Errorf("%s: %w", msg, graphdriver.ErrNotSupported)
 }

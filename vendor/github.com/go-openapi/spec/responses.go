@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/go-openapi/swag"
 )
@@ -51,7 +52,7 @@ func (r Responses) JSONLookup(token string) (interface{}, error) {
 	}
 	if i, err := strconv.Atoi(token); err == nil {
 		if scr, ok := r.StatusCodeResponses[i]; ok {
-			return &scr, nil
+			return scr, nil
 		}
 	}
 	return nil, fmt.Errorf("object has no field %q", token)
@@ -62,6 +63,7 @@ func (r *Responses) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &r.ResponsesProps); err != nil {
 		return err
 	}
+
 	if err := json.Unmarshal(data, &r.VendorExtensible); err != nil {
 		return err
 	}
@@ -85,11 +87,15 @@ func (r Responses) MarshalJSON() ([]byte, error) {
 	return concated, nil
 }
 
+// ResponsesProps describes all responses for an operation.
+// It tells what is the default response and maps all responses with a
+// HTTP status code.
 type ResponsesProps struct {
 	Default             *Response
 	StatusCodeResponses map[int]Response
 }
 
+// MarshalJSON marshals responses as JSON
 func (r ResponsesProps) MarshalJSON() ([]byte, error) {
 	toser := map[string]Response{}
 	if r.Default != nil {
@@ -101,21 +107,33 @@ func (r ResponsesProps) MarshalJSON() ([]byte, error) {
 	return json.Marshal(toser)
 }
 
+// UnmarshalJSON unmarshals responses from JSON
 func (r *ResponsesProps) UnmarshalJSON(data []byte) error {
-	var res map[string]Response
+	var res map[string]json.RawMessage
 	if err := json.Unmarshal(data, &res); err != nil {
-		return nil
+		return err
 	}
+
 	if v, ok := res["default"]; ok {
-		r.Default = &v
+		var defaultRes Response
+		if err := json.Unmarshal(v, &defaultRes); err != nil {
+			return err
+		}
+		r.Default = &defaultRes
 		delete(res, "default")
 	}
 	for k, v := range res {
-		if nk, err := strconv.Atoi(k); err == nil {
-			if r.StatusCodeResponses == nil {
-				r.StatusCodeResponses = map[int]Response{}
+		if !strings.HasPrefix(k, "x-") {
+			var statusCodeResp Response
+			if err := json.Unmarshal(v, &statusCodeResp); err != nil {
+				return err
 			}
-			r.StatusCodeResponses[nk] = v
+			if nk, err := strconv.Atoi(k); err == nil {
+				if r.StatusCodeResponses == nil {
+					r.StatusCodeResponses = map[int]Response{}
+				}
+				r.StatusCodeResponses[nk] = statusCodeResp
+			}
 		}
 	}
 	return nil

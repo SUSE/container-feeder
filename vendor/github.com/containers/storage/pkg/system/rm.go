@@ -1,12 +1,14 @@
 package system
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"syscall"
 	"time"
 
 	"github.com/containers/storage/pkg/mount"
-	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 // EnsureRemoveAll wraps `os.RemoveAll` to check for specific errors that can
@@ -26,15 +28,36 @@ func EnsureRemoveAll(dir string) error {
 
 	// track retries
 	exitOnErr := make(map[string]int)
-	maxRetry := 5
+	maxRetry := 100
+
+	// Attempt a simple remove all first, this avoids the more expensive
+	// RecursiveUnmount call if not needed.
+	if err := os.RemoveAll(dir); err == nil {
+		return nil
+	}
 
 	// Attempt to unmount anything beneath this dir first
-	mount.RecursiveUnmount(dir)
+	if err := mount.RecursiveUnmount(dir); err != nil {
+		logrus.Debugf("RecusiveUnmount on %s failed: %v", dir, err)
+	}
 
 	for {
 		err := os.RemoveAll(dir)
 		if err == nil {
-			return err
+			return nil
+		}
+
+		// If the RemoveAll fails with a permission error, we
+		// may have immutable files so try to remove the
+		// immutable flag and redo the RemoveAll.
+		if errors.Is(err, syscall.EPERM) {
+			if err = resetFileFlags(dir); err != nil {
+				return fmt.Errorf("resetting file flags: %w", err)
+			}
+			err = os.RemoveAll(dir)
+			if err == nil {
+				return nil
+			}
 		}
 
 		pe, ok := err.(*os.PathError)
@@ -59,16 +82,12 @@ func EnsureRemoveAll(dir string) error {
 			continue
 		}
 
-		if pe.Err != syscall.EBUSY {
+		if !IsEBUSY(pe.Err) {
 			return err
 		}
 
-		if mounted, _ := mount.Mounted(pe.Path); mounted {
-			if e := mount.Unmount(pe.Path); e != nil {
-				if mounted, _ := mount.Mounted(pe.Path); mounted {
-					return errors.Wrapf(e, "error while removing %s", dir)
-				}
-			}
+		if e := mount.Unmount(pe.Path); e != nil {
+			return fmt.Errorf("while removing %s: %w", dir, e)
 		}
 
 		if exitOnErr[pe.Path] == maxRetry {

@@ -4,7 +4,7 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +37,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 
 	aufsTempdir := ""
 	aufsHardlinks := make(map[string]*tar.Header)
+	buffer := make([]byte, 1<<20)
 
 	// Iterate through the files in the archive.
 	for {
@@ -68,7 +69,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 		// specific or Linux-specific, this warning should be changed to an error
 		// to cater for the situation where someone does manage to upload a Linux
 		// image but have it tagged as Windows inadvertently.
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == windows {
 			if strings.Contains(hdr.Name, ":") {
 				logrus.Warnf("Windows: Ignoring %s (is this a Linux image?)", hdr.Name)
 				continue
@@ -84,7 +85,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			parentPath := filepath.Join(dest, parent)
 
 			if _, err := os.Lstat(parentPath); err != nil && os.IsNotExist(err) {
-				err = system.MkdirAll(parentPath, 0600, "")
+				err = os.MkdirAll(parentPath, 0o755)
 				if err != nil {
 					return 0, err
 				}
@@ -100,12 +101,12 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				basename := filepath.Base(hdr.Name)
 				aufsHardlinks[basename] = hdr
 				if aufsTempdir == "" {
-					if aufsTempdir, err = ioutil.TempDir("", "storageplnk"); err != nil {
+					if aufsTempdir, err = os.MkdirTemp("", "storageplnk"); err != nil {
 						return 0, err
 					}
 					defer os.RemoveAll(aufsTempdir)
 				}
-				if err := createTarFile(filepath.Join(aufsTempdir, basename), dest, hdr, tr, true, nil, options.InUserNS); err != nil {
+				if err := createTarFile(filepath.Join(aufsTempdir, basename), dest, hdr, tr, true, nil, options.InUserNS, options.IgnoreChownErrors, options.ForceMask, buffer); err != nil {
 					return 0, err
 				}
 			}
@@ -133,7 +134,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				if err != nil {
 					return 0, err
 				}
-				err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 					if err != nil {
 						if os.IsNotExist(err) {
 							err = nil // parent was deleted
@@ -144,6 +145,9 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 						return nil
 					}
 					if _, exists := unpackedPaths[path]; !exists {
+						if err := resetImmutable(path, nil); err != nil {
+							return err
+						}
 						err := os.RemoveAll(path)
 						return err
 					}
@@ -155,6 +159,9 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			} else {
 				originalBase := base[len(WhiteoutPrefix):]
 				originalPath := filepath.Join(dir, originalBase)
+				if err := resetImmutable(originalPath, nil); err != nil {
+					return 0, err
+				}
 				if err := os.RemoveAll(originalPath); err != nil {
 					return 0, err
 				}
@@ -164,7 +171,15 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 			// The only exception is when it is a directory *and* the file from
 			// the layer is also a directory. Then we want to merge them (i.e.
 			// just apply the metadata from the layer).
+			//
+			// We always reset the immutable flag (if present) to allow metadata
+			// changes and to allow directory modification. The flag will be
+			// re-applied based on the contents of hdr either at the end for
+			// directories or in createTarFile otherwise.
 			if fi, err := os.Lstat(path); err == nil {
+				if err := resetImmutable(path, &fi); err != nil {
+					return 0, err
+				}
 				if !(fi.IsDir() && hdr.Typeflag == tar.TypeDir) {
 					if err := os.RemoveAll(path); err != nil {
 						return 0, err
@@ -182,7 +197,7 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				linkBasename := filepath.Base(hdr.Linkname)
 				srcHdr = aufsHardlinks[linkBasename]
 				if srcHdr == nil {
-					return 0, fmt.Errorf("Invalid aufs hardlink")
+					return 0, fmt.Errorf("invalid aufs hardlink")
 				}
 				tmpFile, err := os.Open(filepath.Join(aufsTempdir, linkBasename))
 				if err != nil {
@@ -192,11 +207,11 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 				srcData = tmpFile
 			}
 
-			if err := remapIDs(idMappings, srcHdr); err != nil {
+			if err := remapIDs(nil, idMappings, options.ChownOpts, srcHdr); err != nil {
 				return 0, err
 			}
 
-			if err := createTarFile(path, dest, srcHdr, srcData, true, nil, options.InUserNS); err != nil {
+			if err := createTarFile(path, dest, srcHdr, srcData, true, nil, options.InUserNS, options.IgnoreChownErrors, options.ForceMask, buffer); err != nil {
 				return 0, err
 			}
 
@@ -212,6 +227,9 @@ func UnpackLayer(dest string, layer io.Reader, options *TarOptions) (size int64,
 	for _, hdr := range dirs {
 		path := filepath.Join(dest, hdr.Name)
 		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil {
+			return 0, err
+		}
+		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {
 			return 0, err
 		}
 	}
@@ -244,7 +262,9 @@ func applyLayerHandler(dest string, layer io.Reader, options *TarOptions, decomp
 	if err != nil {
 		return 0, err
 	}
-	defer system.Umask(oldmask) // ignore err, ErrNotSupportedPlatform
+	defer func() {
+		_, _ = system.Umask(oldmask) // Ignore err. This can only fail with ErrNotSupportedPlatform, in which case we would have failed above.
+	}()
 
 	if decompress {
 		layer, err = DecompressStream(layer)

@@ -1,3 +1,4 @@
+//go:build !windows
 // +build !windows
 
 package idtools
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/containers/storage/pkg/system"
 	"github.com/opencontainers/runc/libcontainer/user"
@@ -26,13 +28,18 @@ func mkdirAs(path string, mode os.FileMode, ownerUID, ownerGID int, mkAll, chown
 	// so that we can chown all of them properly at the end.  If chownExisting is false, we won't
 	// chown the full directory path if it exists
 	var paths []string
-	if _, err := os.Stat(path); err != nil && os.IsNotExist(err) {
+	st, err := os.Stat(path)
+	if err != nil && os.IsNotExist(err) {
 		paths = []string{path}
-	} else if err == nil && chownExisting {
-		// short-circuit--we were called with an existing directory and chown was requested
-		return os.Chown(path, ownerUID, ownerGID)
 	} else if err == nil {
-		// nothing to do; directory path fully exists already and chown was NOT requested
+		if !st.IsDir() {
+			return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+		}
+		if chownExisting {
+			// short-circuit--we were called with an existing directory and chown was requested
+			return SafeChown(path, ownerUID, ownerGID)
+		}
+		// nothing to do; directory exists and chown was NOT requested
 		return nil
 	}
 
@@ -40,6 +47,9 @@ func mkdirAs(path string, mode os.FileMode, ownerUID, ownerGID int, mkAll, chown
 		// walk back to "/" looking for directories which do not exist
 		// and add them to the paths array for chown after creation
 		dirPath := path
+		if !filepath.IsAbs(dirPath) {
+			return fmt.Errorf("path: %s should be absolute", dirPath)
+		}
 		for {
 			dirPath = filepath.Dir(dirPath)
 			if dirPath == "/" {
@@ -49,7 +59,7 @@ func mkdirAs(path string, mode os.FileMode, ownerUID, ownerGID int, mkAll, chown
 				paths = append(paths, dirPath)
 			}
 		}
-		if err := system.MkdirAll(path, mode, ""); err != nil && !os.IsExist(err) {
+		if err := os.MkdirAll(path, mode); err != nil {
 			return err
 		}
 	} else {
@@ -60,7 +70,7 @@ func mkdirAs(path string, mode os.FileMode, ownerUID, ownerGID int, mkAll, chown
 	// even if it existed, we will chown the requested path + any subpaths that
 	// didn't exist when we called MkdirAll
 	for _, pathComponent := range paths {
-		if err := os.Chown(pathComponent, ownerUID, ownerGID); err != nil {
+		if err := SafeChown(pathComponent, ownerUID, ownerGID); err != nil {
 			return err
 		}
 	}
@@ -81,13 +91,13 @@ func CanAccess(path string, pair IDPair) bool {
 }
 
 func accessible(isOwner, isGroup bool, perms os.FileMode) bool {
-	if isOwner && (perms&0100 == 0100) {
+	if isOwner && (perms&0o100 == 0o100) {
 		return true
 	}
-	if isGroup && (perms&0010 == 0010) {
+	if isGroup && (perms&0o010 == 0o010) {
 		return true
 	}
-	if perms&0001 == 0001 {
+	if perms&0o001 == 0o001 {
 		return true
 	}
 	return false

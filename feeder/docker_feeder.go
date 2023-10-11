@@ -19,9 +19,10 @@ package feeder
 
 import (
 	"context"
-	"io/ioutil"
+	"encoding/json"
+	"errors"
+	"io"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/docker/docker/api/types"
@@ -48,21 +49,6 @@ func NewDockerFeeder() (*DockerFeeder, error) {
 	return feeder, nil
 }
 
-// dockerDaemonAPIVersion returns the API version supported by the server by
-// shelling out.
-func dockerDaemonAPIVersion() (string, error) {
-	out, err := exec.Command(
-		"docker",
-		"version",
-		"--format",
-		"{{.Server.APIVersion}}").Output()
-	if err != nil {
-		return "", err
-	}
-	api := strings.Trim(string(out[:]), "\n")
-	return api, nil
-}
-
 // connectToDaemon returns a Docker client.Client using the right version of
 // the API
 func connectToDaemon() (*client.Client, error) {
@@ -70,15 +56,36 @@ func connectToDaemon() (*client.Client, error) {
 	// try to use the latest one, which might be too new compared to the
 	// one supported by the docker daemon
 
-	apiVersion, err := dockerDaemonAPIVersion()
+	cli, err := client.NewEnvClient()
 	if err != nil {
 		return nil, err
 	}
+	vers, err := cli.ServerVersion(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	var apiVersion string = ""
+
+	for _, component := range vers.Components {
+		if component.Name != "Engine" {
+			continue
+		}
+		if vers, found := component.Details["ApiVersion"]; found {
+			apiVersion = vers
+		}
+	}
+
+	if apiVersion == "" {
+		return nil, errors.New("Could not obtain docker Engine API version")
+	}
+
 	if err := os.Setenv("DOCKER_API_VERSION", apiVersion); err != nil {
 		return nil, err
 	}
 
-	cli, err := client.NewEnvClient()
+	cli, err = client.NewEnvClient()
+
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +115,10 @@ func (f *DockerFeeder) Images() ([]string, error) {
 	return tags, nil
 }
 
+type loadResponse struct {
+	Stream string `json:stream`
+}
+
 // LoadImage loads the specified image into docker. Returns the image name
 // loaded into the docker daemon.
 func (f *DockerFeeder) LoadImage(pathToImage string) (string, error) {
@@ -122,12 +133,18 @@ func (f *DockerFeeder) LoadImage(pathToImage string) (string, error) {
 		return "", err
 	}
 	defer ret.Body.Close()
-	b, err := ioutil.ReadAll(ret.Body)
+	b, err := io.ReadAll(ret.Body)
 	if err != nil {
 		return "", err
 	}
 
-	return strings.TrimSpace(strings.TrimPrefix(string(b[:]), "Loaded image:")), nil
+	loadResp := loadResponse{}
+	err = json.Unmarshal(b, &loadResp)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(strings.TrimPrefix(string(loadResp.Stream), "Loaded image:")), nil
 }
 
 // TagImage tags the specified docker image with the supplied tags.

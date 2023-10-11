@@ -18,18 +18,15 @@
 package feeder
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 
 	"github.com/containers/image/docker/reference"
 
-	wlk "github.com/kubic-project/container-feeder/walker"
+	wlk "github.com/SUSE/container-feeder/walker"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -62,7 +59,7 @@ func parseWhitelist(whitelist []string) ([]string, error) {
 func loadConfig() (FeederConfig, error) {
 	config := FeederConfig{}
 
-	file, err := ioutil.ReadFile(configFile)
+	file, err := os.ReadFile(configFile)
 	if err != nil {
 		return config, err
 	}
@@ -159,6 +156,8 @@ func NewFeeder() (*Feeder, error) {
 		log.Debugf("Feeder target '%s': using DockerFeeder", f.config.Target)
 		f.feeder, err = NewDockerFeeder()
 	case "crio":
+		fallthrough
+	case "podman":
 		log.Debugf("Feeder target '%s': using CRIOFeeder", f.config.Target)
 		f.feeder, err = NewCRIOFeeder()
 	default:
@@ -187,7 +186,7 @@ func Import(path string) (FeederLoadResponse, error) {
 
 	log.Debugf("Images to import: %v", imagesToImport)
 	for tag, file := range imagesToImport {
-		_, err := f.feeder.LoadImage(file)
+		loadedName, err := f.feeder.LoadImage(file)
 		if err != nil {
 			log.Warnf("Could not load image %s: %v", file, err)
 			res.FailedImports = append(
@@ -197,7 +196,7 @@ func Import(path string) (FeederLoadResponse, error) {
 					Error: err,
 				})
 		} else {
-			err = f.feeder.TagImage(tag, imagesToImportTags[tag])
+			err = f.feeder.TagImage(loadedName, imagesToImportTags[tag])
 			if err != nil {
 				log.Warnf("Could not tag image %s: %v", file, err)
 				res.FailedImports = append(
@@ -215,7 +214,7 @@ func Import(path string) (FeederLoadResponse, error) {
 	return res, nil
 }
 
-//normalizeNameTag split the image into it's name and tag.
+// normalizeNameTag split the image into it's name and tag.
 func normalizeNameTag(image string) (string, string, error) {
 	// Remove illegal characters when image is "<none>:<none>"
 	re := regexp.MustCompile(`<|>`)
@@ -255,7 +254,7 @@ func isWhitelisted(image string, whitelist []string) (bool, error) {
 
 // shouldImportImage will check if any tag under newTags is not inside oldTags.
 // If any tag is found that matches this condition, we should import the image.
-func (f *Feeder) shouldImportImage(oldTags, newTags []string) (bool) {
+func (f *Feeder) shouldImportImage(oldTags, newTags []string) bool {
 	for _, newTag := range newTags {
 		if !stringInSlice(newTag, oldTags) {
 			return true
@@ -348,7 +347,7 @@ func findRPMImages(path string) (map[string]string, map[string][]string, error) 
 // file shipped by RPM
 // Returns repotag (`<name>:<tag>`), a list of additional tags, and image name
 func repotagFromRPMFile(file string) (string, []string, string, error) {
-	data, err := ioutil.ReadFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return "", nil, "", err
 	}
@@ -373,25 +372,4 @@ func repotagFromRPMFile(file string) (string, []string, string, error) {
 	}
 
 	return repotag, repotags, image, nil
-}
-
-// runCommand executes the program specified in args with env and writes to
-// stdout.
-func runCommand(args []string, env string, stdout *os.File) error {
-	var cmd *exec.Cmd
-	var serr bytes.Buffer
-
-	log.Debugf("runCommand(args=%s, env=%s)", args, env)
-
-	cmd = exec.Command(args[0], args[1:]...)
-	cmd.Stdout = stdout
-	cmd.Stderr = &serr
-	cmd.Env = []string{env}
-
-	err := cmd.Run()
-	if err != nil {
-		log.Debugf("Error executing command: %s", serr.String())
-		return fmt.Errorf("error running command: %s", err.Error())
-	}
-	return nil
 }

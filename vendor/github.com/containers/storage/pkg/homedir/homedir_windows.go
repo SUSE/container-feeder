@@ -1,5 +1,8 @@
 package homedir
 
+// Copyright 2013-2018 Docker, Inc.
+// NOTE: this package has originally been copied from github.com/docker/docker.
+
 import (
 	"os"
 )
@@ -14,7 +17,12 @@ func Key() string {
 // environment variables depending on the target operating system.
 // Returned path should be used with "path/filepath" to form new paths.
 func Get() string {
-	return os.Getenv(Key())
+	home := os.Getenv(Key())
+	if home != "" {
+		return home
+	}
+	home, _ = os.UserHomeDir()
+	return home
 }
 
 // GetShortcutString returns the string that is shortcut to user's home directory

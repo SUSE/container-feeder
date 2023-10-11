@@ -5,24 +5,27 @@ import (
 	"bufio"
 	"bytes"
 	"compress/bzip2"
-	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/containers/storage/pkg/fileutils"
 	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/pkg/ioutils"
 	"github.com/containers/storage/pkg/pools"
 	"github.com/containers/storage/pkg/promise"
 	"github.com/containers/storage/pkg/system"
+	"github.com/containers/storage/pkg/unshare"
+	gzip "github.com/klauspost/pgzip"
 	"github.com/sirupsen/logrus"
+	"github.com/ulikunitz/xz"
 )
 
 type (
@@ -33,18 +36,23 @@ type (
 
 	// TarOptions wraps the tar options.
 	TarOptions struct {
-		IncludeFiles     []string
-		ExcludePatterns  []string
-		Compression      Compression
-		NoLchown         bool
-		UIDMaps          []idtools.IDMap
-		GIDMaps          []idtools.IDMap
-		ChownOpts        *idtools.IDPair
-		IncludeSourceDir bool
+		IncludeFiles      []string
+		ExcludePatterns   []string
+		Compression       Compression
+		NoLchown          bool
+		UIDMaps           []idtools.IDMap
+		GIDMaps           []idtools.IDMap
+		IgnoreChownErrors bool
+		ChownOpts         *idtools.IDPair
+		IncludeSourceDir  bool
 		// WhiteoutFormat is the expected on disk format for whiteout files.
 		// This format will be converted to the standard format on pack
 		// and from the standard format on unpack.
 		WhiteoutFormat WhiteoutFormat
+		// This is additional data to be used by the converter.  It will
+		// not survive a round trip through JSON, so it's primarily
+		// intended for generating archives (i.e., converting writes).
+		WhiteoutData interface{}
 		// When unpacking, specifies whether overwriting a directory with a
 		// non-directory is allowed and vice versa.
 		NoOverwriteDirNonDir bool
@@ -52,27 +60,55 @@ type (
 		// replaced with the matching name from this map.
 		RebaseNames map[string]string
 		InUserNS    bool
+		// CopyPass indicates that the contents of any archive we're creating
+		// will instantly be extracted and written to disk, so we can deviate
+		// from the traditional behavior/format to get features like subsecond
+		// precision in timestamps.
+		CopyPass bool
+		// ForceMask, if set, indicates the permission mask used for created files.
+		ForceMask *os.FileMode
 	}
 )
 
-// Archiver allows the reuse of most utility functions of this package
-// with a pluggable Untar function. Also, to facilitate the passing of
-// specific id mappings for untar, an archiver can be created with maps
-// which will then be passed to Untar operations
+const (
+	tarExt  = "tar"
+	solaris = "solaris"
+	windows = "windows"
+	darwin  = "darwin"
+	freebsd = "freebsd"
+)
+
+var xattrsToIgnore = map[string]interface{}{
+	"security.selinux": true,
+}
+
+// Archiver allows the reuse of most utility functions of this package with a
+// pluggable Untar function.  To facilitate the passing of specific id mappings
+// for untar, an archiver can be created with maps which will then be passed to
+// Untar operations.  If ChownOpts is set, its values are mapped using
+// UntarIDMappings before being used to create files and directories on disk.
 type Archiver struct {
-	Untar      func(io.Reader, string, *TarOptions) error
-	IDMappings *idtools.IDMappings
+	Untar           func(io.Reader, string, *TarOptions) error
+	TarIDMappings   *idtools.IDMappings
+	ChownOpts       *idtools.IDPair
+	UntarIDMappings *idtools.IDMappings
 }
 
 // NewDefaultArchiver returns a new Archiver without any IDMappings
 func NewDefaultArchiver() *Archiver {
-	return &Archiver{Untar: Untar, IDMappings: &idtools.IDMappings{}}
+	return &Archiver{Untar: Untar, TarIDMappings: &idtools.IDMappings{}, UntarIDMappings: &idtools.IDMappings{}}
 }
 
 // breakoutError is used to differentiate errors related to breaking out
 // When testing archive breakout in the unit tests, this error is expected
 // in order for the test to pass.
 type breakoutError error
+
+// overwriteError is used to differentiate errors related to attempting to
+// overwrite a directory with a non-directory or vice-versa.  When testing
+// copying a file over a directory, this error is expected in order for the
+// test to pass.
+type overwriteError error
 
 const (
 	// Uncompressed represents the uncompressed.
@@ -83,6 +119,8 @@ const (
 	Gzip
 	// Xz is xz compression algorithm.
 	Xz
+	// Zstd is zstd compression algorithm.
+	Zstd
 )
 
 const (
@@ -91,16 +129,6 @@ const (
 	// OverlayWhiteoutFormat formats whiteout according to the overlay
 	// standard.
 	OverlayWhiteoutFormat
-)
-
-const (
-	modeISDIR  = 040000  // Directory
-	modeISFIFO = 010000  // FIFO
-	modeISREG  = 0100000 // Regular file
-	modeISLNK  = 0120000 // Symbolic link
-	modeISBLK  = 060000  // Block special file
-	modeISCHR  = 020000  // Character special file
-	modeISSOCK = 0140000 // Socket
 )
 
 // IsArchivePath checks if the (possibly compressed) file at the given path
@@ -115,6 +143,7 @@ func IsArchivePath(path string) bool {
 	if err != nil {
 		return false
 	}
+	defer rdr.Close()
 	r := tar.NewReader(rdr)
 	_, err = r.Next()
 	return err == nil
@@ -126,6 +155,7 @@ func DetectCompression(source []byte) Compression {
 		Bzip2: {0x42, 0x5A, 0x68},
 		Gzip:  {0x1F, 0x8B, 0x08},
 		Xz:    {0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00},
+		Zstd:  {0x28, 0xb5, 0x2f, 0xfd},
 	} {
 		if len(source) < len(m) {
 			logrus.Debug("Len too short")
@@ -136,12 +166,6 @@ func DetectCompression(source []byte) Compression {
 		}
 	}
 	return Uncompressed
-}
-
-func xzDecompress(archive io.Reader) (io.ReadCloser, <-chan struct{}, error) {
-	args := []string{"xz", "-d", "-c", "-q"}
-
-	return cmdStream(exec.Command(args[0], args[1:]...), archive)
 }
 
 // DecompressStream decompresses the archive and returns a ReaderCloser with the decompressed archive.
@@ -176,17 +200,16 @@ func DecompressStream(archive io.Reader) (io.ReadCloser, error) {
 		readBufWrapper := p.NewReadCloserWrapper(buf, bz2Reader)
 		return readBufWrapper, nil
 	case Xz:
-		xzReader, chdone, err := xzDecompress(buf)
+		xzReader, err := xz.NewReader(buf)
 		if err != nil {
 			return nil, err
 		}
 		readBufWrapper := p.NewReadCloserWrapper(buf, xzReader)
-		return ioutils.NewReadCloserWrapper(readBufWrapper, func() error {
-			<-chdone
-			return readBufWrapper.Close()
-		}), nil
+		return readBufWrapper, nil
+	case Zstd:
+		return zstdReader(buf)
 	default:
-		return nil, fmt.Errorf("Unsupported compression format %s", (&compression).Extension())
+		return nil, fmt.Errorf("unsupported compression format %s", (&compression).Extension())
 	}
 }
 
@@ -202,12 +225,14 @@ func CompressStream(dest io.Writer, compression Compression) (io.WriteCloser, er
 		gzWriter := gzip.NewWriter(dest)
 		writeBufWrapper := p.NewWriteCloserWrapper(buf, gzWriter)
 		return writeBufWrapper, nil
+	case Zstd:
+		return zstdWriter(dest)
 	case Bzip2, Xz:
 		// archive/bzip2 does not support writing, and there is no xz support at all
 		// However, this is not a problem as docker only currently generates gzipped tars
-		return nil, fmt.Errorf("Unsupported compression format %s", (&compression).Extension())
+		return nil, fmt.Errorf("unsupported compression format %s", (&compression).Extension())
 	default:
-		return nil, fmt.Errorf("Unsupported compression format %s", (&compression).Extension())
+		return nil, fmt.Errorf("unsupported compression format %s", (&compression).Extension())
 	}
 }
 
@@ -293,7 +318,6 @@ func ReplaceFileTarWrapper(inputTarStream io.ReadCloser, mods map[string]TarModi
 		}
 
 		pipeWriter.Close()
-
 	}()
 	return pipeReader
 }
@@ -302,13 +326,15 @@ func ReplaceFileTarWrapper(inputTarStream io.ReadCloser, mods map[string]TarModi
 func (compression *Compression) Extension() string {
 	switch *compression {
 	case Uncompressed:
-		return "tar"
+		return tarExt
 	case Bzip2:
-		return "tar.bz2"
+		return tarExt + ".bz2"
 	case Gzip:
-		return "tar.gz"
+		return tarExt + ".gz"
 	case Xz:
-		return "tar.xz"
+		return tarExt + ".xz"
+	case Zstd:
+		return tarExt + ".zst"
 	}
 	return ""
 }
@@ -322,10 +348,10 @@ func FileInfoHeader(name string, fi os.FileInfo, link string) (*tar.Header, erro
 	if err != nil {
 		return nil, err
 	}
-	hdr.Mode = fillGo18FileTypeBits(int64(chmodTarEntry(os.FileMode(hdr.Mode))), fi)
+	hdr.Mode = int64(chmodTarEntry(os.FileMode(hdr.Mode)))
 	name, err = canonicalTarName(name, fi.IsDir())
 	if err != nil {
-		return nil, fmt.Errorf("tar: cannot canonicalize path: %v", err)
+		return nil, fmt.Errorf("tar: cannot canonicalize path: %w", err)
 	}
 	hdr.Name = name
 	if err := setHeaderForSpecialDevice(hdr, name, fi.Sys()); err != nil {
@@ -334,45 +360,59 @@ func FileInfoHeader(name string, fi os.FileInfo, link string) (*tar.Header, erro
 	return hdr, nil
 }
 
-// fillGo18FileTypeBits fills type bits which have been removed on Go 1.9 archive/tar
-// https://github.com/golang/go/commit/66b5a2f
-func fillGo18FileTypeBits(mode int64, fi os.FileInfo) int64 {
-	fm := fi.Mode()
-	switch {
-	case fm.IsRegular():
-		mode |= modeISREG
-	case fi.IsDir():
-		mode |= modeISDIR
-	case fm&os.ModeSymlink != 0:
-		mode |= modeISLNK
-	case fm&os.ModeDevice != 0:
-		if fm&os.ModeCharDevice != 0 {
-			mode |= modeISCHR
-		} else {
-			mode |= modeISBLK
-		}
-	case fm&os.ModeNamedPipe != 0:
-		mode |= modeISFIFO
-	case fm&os.ModeSocket != 0:
-		mode |= modeISSOCK
-	}
-	return mode
-}
-
-// ReadSecurityXattrToTarHeader reads security.capability xattr from filesystem
-// to a tar header
+// ReadSecurityXattrToTarHeader reads security.capability, security,image
+// xattrs from filesystem to a tar header
 func ReadSecurityXattrToTarHeader(path string, hdr *tar.Header) error {
-	capability, _ := system.Lgetxattr(path, "security.capability")
-	if capability != nil {
+	if hdr.Xattrs == nil {
 		hdr.Xattrs = make(map[string]string)
-		hdr.Xattrs["security.capability"] = string(capability)
+	}
+	for _, xattr := range []string{"security.capability", "security.ima"} {
+		capability, err := system.Lgetxattr(path, xattr)
+		if err != nil && !errors.Is(err, system.EOPNOTSUPP) && err != system.ErrNotSupportedPlatform {
+			return fmt.Errorf("failed to read %q attribute from %q: %w", xattr, path, err)
+		}
+		if capability != nil {
+			hdr.Xattrs[xattr] = string(capability)
+		}
 	}
 	return nil
 }
 
-type tarWhiteoutConverter interface {
+// ReadUserXattrToTarHeader reads user.* xattr from filesystem to a tar header
+func ReadUserXattrToTarHeader(path string, hdr *tar.Header) error {
+	xattrs, err := system.Llistxattr(path)
+	if err != nil && !errors.Is(err, system.EOPNOTSUPP) && err != system.ErrNotSupportedPlatform {
+		return err
+	}
+	for _, key := range xattrs {
+		if strings.HasPrefix(key, "user.") {
+			value, err := system.Lgetxattr(path, key)
+			if err != nil {
+				if errors.Is(err, system.E2BIG) {
+					logrus.Errorf("archive: Skipping xattr for file %s since value is too big: %s", path, key)
+					continue
+				}
+				return err
+			}
+			if hdr.Xattrs == nil {
+				hdr.Xattrs = make(map[string]string)
+			}
+			hdr.Xattrs[key] = string(value)
+		}
+	}
+	return nil
+}
+
+type TarWhiteoutHandler interface {
+	Setxattr(path, name string, value []byte) error
+	Mknod(path string, mode uint32, dev int) error
+	Chown(path string, uid, gid int) error
+}
+
+type TarWhiteoutConverter interface {
 	ConvertWrite(*tar.Header, string, os.FileInfo) (*tar.Header, error)
 	ConvertRead(*tar.Header, string) (bool, error)
+	ConvertReadWithHandler(*tar.Header, string, TarWhiteoutHandler) (bool, error)
 }
 
 type tarAppender struct {
@@ -388,7 +428,12 @@ type tarAppender struct {
 	// non standard format. The whiteout files defined
 	// by the AUFS standard are used as the tar whiteout
 	// standard.
-	WhiteoutConverter tarWhiteoutConverter
+	WhiteoutConverter TarWhiteoutConverter
+	// CopyPass indicates that the contents of any archive we're creating
+	// will instantly be extracted and written to disk, so we can deviate
+	// from the traditional behavior/format to get features like subsecond
+	// precision in timestamps.
+	CopyPass bool
 }
 
 func newTarAppender(idMapping *idtools.IDMappings, writer io.Writer, chownOpts *idtools.IDPair) *tarAppender {
@@ -402,7 +447,7 @@ func newTarAppender(idMapping *idtools.IDMappings, writer io.Writer, chownOpts *
 }
 
 // canonicalTarName provides a platform-independent and consistent posix-style
-//path for files and directories to be archived regardless of the platform.
+// path for files and directories to be archived regardless of the platform.
 func canonicalTarName(name string, isDir bool) (string, error) {
 	name, err := CanonicalTarNameForPath(name)
 	if err != nil {
@@ -431,6 +476,10 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 			return err
 		}
 	}
+	if fi.Mode()&os.ModeSocket != 0 {
+		logrus.Warnf("archive: skipping %q since it is a socket", path)
+		return nil
+	}
 
 	hdr, err := FileInfoHeader(name, fi, link)
 	if err != nil {
@@ -438,6 +487,15 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 	}
 	if err := ReadSecurityXattrToTarHeader(path, hdr); err != nil {
 		return err
+	}
+	if err := ReadUserXattrToTarHeader(path, hdr); err != nil {
+		return err
+	}
+	if err := ReadFileFlagsToTarHeader(path, hdr); err != nil {
+		return err
+	}
+	if ta.CopyPass {
+		copyPassHeader(hdr)
 	}
 
 	// if it's not a directory and has more than 1 link,
@@ -458,9 +516,9 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 		}
 	}
 
-	//handle re-mapping container ID mappings back to host ID mappings before
-	//writing tar headers/files. We skip whiteout files because they were written
-	//by the kernel and already have proper ownership relative to the host
+	// handle re-mapping container ID mappings back to host ID mappings before
+	// writing tar headers/files. We skip whiteout files because they were written
+	// by the kernel and already have proper ownership relative to the host
 	if !strings.HasPrefix(filepath.Base(hdr.Name), WhiteoutPrefix) && !ta.IDMappings.Empty() {
 		fileIDPair, err := getFileUIDGID(fi.Sys())
 		if err != nil {
@@ -477,6 +535,8 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 		hdr.Uid = ta.ChownOpts.UID
 		hdr.Gid = ta.ChownOpts.GID
 	}
+
+	maybeTruncateHeaderModTime(hdr)
 
 	if ta.WhiteoutConverter != nil {
 		wo, err := ta.WhiteoutConverter.ConvertWrite(hdr, path, fi)
@@ -505,10 +565,7 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 	}
 
 	if hdr.Typeflag == tar.TypeReg && hdr.Size > 0 {
-		// We use system.OpenSequential to ensure we use sequential file
-		// access on Windows to avoid depleting the standby list.
-		// On Linux, this equates to a regular os.Open.
-		file, err := system.OpenSequential(path)
+		file, err := os.Open(path)
 		if err != nil {
 			return err
 		}
@@ -529,18 +586,23 @@ func (ta *tarAppender) addTarFile(path, name string) error {
 	return nil
 }
 
-func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, Lchown bool, chownOpts *idtools.IDPair, inUserns bool) error {
+func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, Lchown bool, chownOpts *idtools.IDPair, inUserns, ignoreChownErrors bool, forceMask *os.FileMode, buffer []byte) error {
 	// hdr.Mode is in linux format, which we can use for sycalls,
 	// but for os.Foo() calls we need the mode converted to os.FileMode,
 	// so use hdrInfo.Mode() (they differ for e.g. setuid bits)
 	hdrInfo := hdr.FileInfo()
+
+	mask := hdrInfo.Mode()
+	if forceMask != nil {
+		mask = *forceMask
+	}
 
 	switch hdr.Typeflag {
 	case tar.TypeDir:
 		// Create directory unless it exists as a directory already.
 		// In that case we just want to merge the two
 		if fi, err := os.Lstat(path); !(err == nil && fi.IsDir()) {
-			if err := os.Mkdir(path, hdrInfo.Mode()); err != nil {
+			if err := os.Mkdir(path, mask); err != nil {
 				return err
 			}
 		}
@@ -549,11 +611,11 @@ func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, L
 		// Source is regular file. We use system.OpenFileSequential to use sequential
 		// file access to avoid depleting the standby list on Windows.
 		// On Linux, this equates to a regular os.OpenFile
-		file, err := system.OpenFileSequential(path, os.O_CREATE|os.O_WRONLY, hdrInfo.Mode())
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, mask)
 		if err != nil {
 			return err
 		}
-		if _, err := io.Copy(file, reader); err != nil {
+		if _, err := io.CopyBuffer(file, reader, buffer); err != nil {
 			file.Close()
 			return err
 		}
@@ -561,13 +623,10 @@ func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, L
 
 	case tar.TypeBlock, tar.TypeChar:
 		if inUserns { // cannot create devices in a userns
+			logrus.Debugf("Tar: Can't create device %v while running in user namespace", path)
 			return nil
 		}
-		// Handle this is an OS-specific way
-		if err := handleTarTypeBlockCharFifo(hdr, path); err != nil {
-			return err
-		}
-
+		fallthrough
 	case tar.TypeFifo:
 		// Handle this is an OS-specific way
 		if err := handleTarTypeBlockCharFifo(hdr, path); err != nil {
@@ -580,7 +639,7 @@ func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, L
 		if !strings.HasPrefix(targetPath, extractDir) {
 			return breakoutError(fmt.Errorf("invalid hardlink %q -> %q", targetPath, hdr.Linkname))
 		}
-		if err := os.Link(targetPath, path); err != nil {
+		if err := handleLLink(targetPath, path); err != nil {
 			return err
 		}
 
@@ -606,41 +665,31 @@ func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, L
 		return fmt.Errorf("unhandled tar header type %d", hdr.Typeflag)
 	}
 
+	if forceMask != nil && (hdr.Typeflag != tar.TypeSymlink || runtime.GOOS == "darwin") {
+		value := fmt.Sprintf("%d:%d:0%o", hdr.Uid, hdr.Gid, hdrInfo.Mode()&0o7777)
+		if err := system.Lsetxattr(path, idtools.ContainersOverrideXattr, []byte(value), 0); err != nil {
+			return err
+		}
+	}
+
 	// Lchown is not supported on Windows.
-	if Lchown && runtime.GOOS != "windows" {
+	if Lchown && runtime.GOOS != windows {
 		if chownOpts == nil {
 			chownOpts = &idtools.IDPair{UID: hdr.Uid, GID: hdr.Gid}
 		}
-		if err := os.Lchown(path, chownOpts.UID, chownOpts.GID); err != nil {
-			return err
-		}
-	}
-
-	var errors []string
-	for key, value := range hdr.Xattrs {
-		if err := system.Lsetxattr(path, key, []byte(value), 0); err != nil {
-			if err == syscall.ENOTSUP {
-				// We ignore errors here because not all graphdrivers support
-				// xattrs *cough* old versions of AUFS *cough*. However only
-				// ENOTSUP should be emitted in that case, otherwise we still
-				// bail.
-				errors = append(errors, err.Error())
-				continue
+		err := idtools.SafeLchown(path, chownOpts.UID, chownOpts.GID)
+		if err != nil {
+			if ignoreChownErrors {
+				fmt.Fprintf(os.Stderr, "Chown error detected. Ignoring due to ignoreChownErrors flag: %v\n", err)
+			} else {
+				return err
 			}
-			return err
 		}
-
-	}
-
-	if len(errors) > 0 {
-		logrus.WithFields(logrus.Fields{
-			"errors": errors,
-		}).Warn("ignored xattrs in archive: underlying filesystem doesn't support them")
 	}
 
 	// There is no LChmod, so ignore mode for symlink. Also, this
 	// must happen after chown, as that can modify the file mode
-	if err := handleLChmod(hdr, path, hdrInfo); err != nil {
+	if err := handleLChmod(hdr, path, hdrInfo, forceMask); err != nil {
 		return err
 	}
 
@@ -667,6 +716,42 @@ func createTarFile(path, extractDir string, hdr *tar.Header, reader io.Reader, L
 			return err
 		}
 	}
+
+	var errs []string
+	for key, value := range hdr.Xattrs {
+		if _, found := xattrsToIgnore[key]; found {
+			continue
+		}
+		if err := system.Lsetxattr(path, key, []byte(value), 0); err != nil {
+			if errors.Is(err, syscall.ENOTSUP) || (inUserns && errors.Is(err, syscall.EPERM)) {
+				// We ignore errors here because not all graphdrivers support
+				// xattrs *cough* old versions of AUFS *cough*. However only
+				// ENOTSUP should be emitted in that case, otherwise we still
+				// bail.  We also ignore EPERM errors if we are running in a
+				// user namespace.
+				errs = append(errs, err.Error())
+				continue
+			}
+			return err
+		}
+
+	}
+
+	// We defer setting flags on directories until the end of
+	// Unpack or UnpackLayer in case setting them makes the
+	// directory immutable.
+	if hdr.Typeflag != tar.TypeDir {
+		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {
+			return err
+		}
+	}
+
+	if len(errs) > 0 {
+		logrus.WithFields(logrus.Fields{
+			"errors": errs,
+		}).Warn("ignored xattrs in archive: underlying filesystem doesn't support them")
+	}
+
 	return nil
 }
 
@@ -679,7 +764,6 @@ func Tar(path string, compression Compression) (io.ReadCloser, error) {
 // TarWithOptions creates an archive from the directory at `path`, only including files whose relative
 // paths are included in `options.IncludeFiles` (if non-nil) or not in `options.ExcludePatterns`.
 func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) {
-
 	// Fix the source path to work with long path names. This is a no-op
 	// on platforms other than Windows.
 	srcPath = fixVolumePathPrefix(srcPath)
@@ -702,7 +786,8 @@ func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) 
 			compressWriter,
 			options.ChownOpts,
 		)
-		ta.WhiteoutConverter = getWhiteoutConverter(options.WhiteoutFormat)
+		ta.WhiteoutConverter = GetWhiteoutConverter(options.WhiteoutFormat, options.WhiteoutData)
+		ta.CopyPass = options.CopyPass
 
 		defer func() {
 			// Make sure to check the error on Close.
@@ -754,17 +839,17 @@ func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) 
 			rebaseName := options.RebaseNames[include]
 
 			walkRoot := getWalkRoot(srcPath, include)
-			filepath.Walk(walkRoot, func(filePath string, f os.FileInfo, err error) error {
+			if err := filepath.WalkDir(walkRoot, func(filePath string, d fs.DirEntry, err error) error {
 				if err != nil {
 					logrus.Errorf("Tar: Can't stat file %s to tar: %s", srcPath, err)
 					return nil
 				}
 
 				relFilePath, err := filepath.Rel(srcPath, filePath)
-				if err != nil || (!options.IncludeSourceDir && relFilePath == "." && f.IsDir()) {
+				if err != nil || (!options.IncludeSourceDir && relFilePath == "." && d.IsDir()) {
 					// Error getting relative path OR we are looking
 					// at the source directory path. Skip in both situations.
-					return nil
+					return nil //nolint: nilerr
 				}
 
 				if options.IncludeSourceDir && include == "." && relFilePath != "." {
@@ -779,11 +864,11 @@ func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) 
 				// is asking for that file no matter what - which is true
 				// for some files, like .dockerignore and Dockerfile (sometimes)
 				if include != relFilePath {
-					skip, err = pm.Matches(relFilePath)
+					matches, err := pm.IsMatch(relFilePath)
 					if err != nil {
-						logrus.Errorf("Error matching %s: %v", relFilePath, err)
-						return err
+						return fmt.Errorf("matching %s: %w", relFilePath, err)
 					}
+					skip = matches
 				}
 
 				if skip {
@@ -793,7 +878,7 @@ func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) 
 					// dir. If so then we can't skip this dir.
 
 					// Its not a dir then so we can just return/skip.
-					if !f.IsDir() {
+					if !d.IsDir() {
 						return nil
 					}
 
@@ -844,7 +929,10 @@ func TarWithOptions(srcPath string, options *TarOptions) (io.ReadCloser, error) 
 					}
 				}
 				return nil
-			})
+			}); err != nil {
+				logrus.Errorf("%s", err)
+				return
+			}
 		}
 	}()
 
@@ -860,7 +948,21 @@ func Unpack(decompressedArchive io.Reader, dest string, options *TarOptions) err
 	var dirs []*tar.Header
 	idMappings := idtools.NewIDMappingsFromMaps(options.UIDMaps, options.GIDMaps)
 	rootIDs := idMappings.RootPair()
-	whiteoutConverter := getWhiteoutConverter(options.WhiteoutFormat)
+	whiteoutConverter := GetWhiteoutConverter(options.WhiteoutFormat, options.WhiteoutData)
+	buffer := make([]byte, 1<<20)
+
+	doChown := !options.NoLchown
+	if options.ForceMask != nil {
+		// if ForceMask is in place, make sure lchown is disabled.
+		doChown = false
+		uid, gid, mode, err := GetFileOwner(dest)
+		if err == nil {
+			value := fmt.Sprintf("%d:%d:0%o", uid, gid, mode)
+			if err := system.Lsetxattr(dest, idtools.ContainersOverrideXattr, []byte(value), 0); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Iterate through the files in the archive.
 loop:
@@ -893,7 +995,7 @@ loop:
 			parent := filepath.Dir(hdr.Name)
 			parentPath := filepath.Join(dest, parent)
 			if _, err := os.Lstat(parentPath); err != nil && os.IsNotExist(err) {
-				err = idtools.MkdirAllAndChownNew(parentPath, 0777, rootIDs)
+				err = idtools.MkdirAllAndChownNew(parentPath, 0o777, rootIDs)
 				if err != nil {
 					return err
 				}
@@ -917,13 +1019,13 @@ loop:
 			if options.NoOverwriteDirNonDir && fi.IsDir() && hdr.Typeflag != tar.TypeDir {
 				// If NoOverwriteDirNonDir is true then we cannot replace
 				// an existing directory with a non-directory from the archive.
-				return fmt.Errorf("cannot overwrite directory %q with non-directory %q", path, dest)
+				return overwriteError(fmt.Errorf("cannot overwrite directory %q with non-directory %q", path, dest))
 			}
 
 			if options.NoOverwriteDirNonDir && !fi.IsDir() && hdr.Typeflag == tar.TypeDir {
 				// If NoOverwriteDirNonDir is true then we cannot replace
 				// an existing non-directory with a directory from the archive.
-				return fmt.Errorf("cannot overwrite non-directory %q with directory %q", path, dest)
+				return overwriteError(fmt.Errorf("cannot overwrite non-directory %q with directory %q", path, dest))
 			}
 
 			if fi.IsDir() && hdr.Name == "." {
@@ -938,7 +1040,8 @@ loop:
 		}
 		trBuf.Reset(tr)
 
-		if err := remapIDs(idMappings, hdr); err != nil {
+		chownOpts := options.ChownOpts
+		if err := remapIDs(nil, idMappings, chownOpts, hdr); err != nil {
 			return err
 		}
 
@@ -952,7 +1055,11 @@ loop:
 			}
 		}
 
-		if err := createTarFile(path, dest, hdr, trBuf, !options.NoLchown, options.ChownOpts, options.InUserNS); err != nil {
+		if chownOpts != nil {
+			chownOpts = &idtools.IDPair{UID: hdr.Uid, GID: hdr.Gid}
+		}
+
+		if err = createTarFile(path, dest, hdr, trBuf, doChown, chownOpts, options.InUserNS, options.IgnoreChownErrors, options.ForceMask, buffer); err != nil {
 			return err
 		}
 
@@ -969,6 +1076,9 @@ loop:
 		if err := system.Chtimes(path, hdr.AccessTime, hdr.ModTime); err != nil {
 			return err
 		}
+		if err := WriteFileFlagsFromTarHeader(path, hdr); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -976,7 +1086,9 @@ loop:
 // Untar reads a stream of bytes from `archive`, parses it as a tar archive,
 // and unpacks it into the directory at `dest`.
 // The archive may be compressed with one of the following algorithms:
-//  identity (uncompressed), gzip, bzip2, xz.
+//
+//	identity (uncompressed), gzip, bzip2, xz.
+//
 // FIXME: specify behavior when target path exists vs. doesn't exist.
 func Untar(tarArchive io.Reader, dest string, options *TarOptions) error {
 	return untarHandler(tarArchive, dest, options, true)
@@ -992,7 +1104,7 @@ func UntarUncompressed(tarArchive io.Reader, dest string, options *TarOptions) e
 // Handler for teasing out the automatic decompression
 func untarHandler(tarArchive io.Reader, dest string, options *TarOptions, decompress bool) error {
 	if tarArchive == nil {
-		return fmt.Errorf("Empty archive")
+		return fmt.Errorf("empty archive")
 	}
 	dest = filepath.Clean(dest)
 	if options == nil {
@@ -1019,14 +1131,31 @@ func untarHandler(tarArchive io.Reader, dest string, options *TarOptions, decomp
 // If either Tar or Untar fails, TarUntar aborts and returns the error.
 func (archiver *Archiver) TarUntar(src, dst string) error {
 	logrus.Debugf("TarUntar(%s %s)", src, dst)
-	archive, err := TarWithOptions(src, &TarOptions{Compression: Uncompressed})
+	tarMappings := archiver.TarIDMappings
+	if tarMappings == nil {
+		tarMappings = &idtools.IDMappings{}
+	}
+	options := &TarOptions{
+		UIDMaps:     tarMappings.UIDs(),
+		GIDMaps:     tarMappings.GIDs(),
+		Compression: Uncompressed,
+		CopyPass:    true,
+		InUserNS:    unshare.IsRootless(),
+	}
+	archive, err := TarWithOptions(src, options)
 	if err != nil {
 		return err
 	}
 	defer archive.Close()
-	options := &TarOptions{
-		UIDMaps: archiver.IDMappings.UIDs(),
-		GIDMaps: archiver.IDMappings.GIDs(),
+	untarMappings := archiver.UntarIDMappings
+	if untarMappings == nil {
+		untarMappings = &idtools.IDMappings{}
+	}
+	options = &TarOptions{
+		UIDMaps:   untarMappings.UIDs(),
+		GIDMaps:   untarMappings.GIDs(),
+		ChownOpts: archiver.ChownOpts,
+		InUserNS:  unshare.IsRootless(),
 	}
 	return archiver.Untar(archive, dst, options)
 }
@@ -1038,9 +1167,15 @@ func (archiver *Archiver) UntarPath(src, dst string) error {
 		return err
 	}
 	defer archive.Close()
+	untarMappings := archiver.UntarIDMappings
+	if untarMappings == nil {
+		untarMappings = &idtools.IDMappings{}
+	}
 	options := &TarOptions{
-		UIDMaps: archiver.IDMappings.UIDs(),
-		GIDMaps: archiver.IDMappings.GIDs(),
+		UIDMaps:   untarMappings.UIDs(),
+		GIDMaps:   untarMappings.GIDs(),
+		ChownOpts: archiver.ChownOpts,
+		InUserNS:  unshare.IsRootless(),
 	}
 	return archiver.Untar(archive, dst, options)
 }
@@ -1061,10 +1196,13 @@ func (archiver *Archiver) CopyWithTar(src, dst string) error {
 	// if this archiver is set up with ID mapping we need to create
 	// the new destination directory with the remapped root UID/GID pair
 	// as owner
-	rootIDs := archiver.IDMappings.RootPair()
+	rootIDs := archiver.UntarIDMappings.RootPair()
+	if archiver.ChownOpts != nil {
+		rootIDs = *archiver.ChownOpts
+	}
 	// Create dst, copy src's content into it
 	logrus.Debugf("Creating dest directory: %s", dst)
-	if err := idtools.MkdirAllAndChownNew(dst, 0755, rootIDs); err != nil {
+	if err := idtools.MkdirAllAndChownNew(dst, 0o755, rootIDs); err != nil {
 		return err
 	}
 	logrus.Debugf("Calling TarUntar(%s, %s)", src, dst)
@@ -1082,7 +1220,7 @@ func (archiver *Archiver) CopyFileWithTar(src, dst string) (err error) {
 	}
 
 	if srcSt.IsDir() {
-		return fmt.Errorf("Can't copy a directory")
+		return fmt.Errorf("can't copy a directory")
 	}
 
 	// Clean up the trailing slash. This must be done in an operating
@@ -1091,7 +1229,7 @@ func (archiver *Archiver) CopyFileWithTar(src, dst string) (err error) {
 		dst = filepath.Join(dst, filepath.Base(src))
 	}
 	// Create the holding directory if necessary
-	if err := system.MkdirAll(filepath.Dir(dst), 0700, ""); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
 
@@ -1111,8 +1249,9 @@ func (archiver *Archiver) CopyFileWithTar(src, dst string) (err error) {
 		}
 		hdr.Name = filepath.Base(dst)
 		hdr.Mode = int64(chmodTarEntry(os.FileMode(hdr.Mode)))
+		copyPassHeader(hdr)
 
-		if err := remapIDs(archiver.IDMappings, hdr); err != nil {
+		if err := remapIDs(archiver.TarIDMappings, nil, archiver.ChownOpts, hdr); err != nil {
 			return err
 		}
 
@@ -1132,53 +1271,65 @@ func (archiver *Archiver) CopyFileWithTar(src, dst string) (err error) {
 		}
 	}()
 
-	err = archiver.Untar(r, filepath.Dir(dst), nil)
+	options := &TarOptions{
+		UIDMaps:              archiver.UntarIDMappings.UIDs(),
+		GIDMaps:              archiver.UntarIDMappings.GIDs(),
+		ChownOpts:            archiver.ChownOpts,
+		InUserNS:             unshare.IsRootless(),
+		NoOverwriteDirNonDir: true,
+	}
+	err = archiver.Untar(r, filepath.Dir(dst), options)
 	if err != nil {
 		r.CloseWithError(err)
 	}
 	return err
 }
 
-func remapIDs(idMappings *idtools.IDMappings, hdr *tar.Header) error {
-	ids, err := idMappings.ToHost(idtools.IDPair{UID: hdr.Uid, GID: hdr.Gid})
-	hdr.Uid, hdr.Gid = ids.UID, ids.GID
-	return err
-}
-
-// cmdStream executes a command, and returns its stdout as a stream.
-// If the command fails to run or doesn't complete successfully, an error
-// will be returned, including anything written on stderr.
-func cmdStream(cmd *exec.Cmd, input io.Reader) (io.ReadCloser, <-chan struct{}, error) {
-	chdone := make(chan struct{})
-	cmd.Stdin = input
-	pipeR, pipeW := io.Pipe()
-	cmd.Stdout = pipeW
-	var errBuf bytes.Buffer
-	cmd.Stderr = &errBuf
-
-	// Run the command and return the pipe
-	if err := cmd.Start(); err != nil {
-		return nil, nil, err
-	}
-
-	// Copy stdout to the returned pipe
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			pipeW.CloseWithError(fmt.Errorf("%s: %s", err, errBuf.String()))
+func remapIDs(readIDMappings, writeIDMappings *idtools.IDMappings, chownOpts *idtools.IDPair, hdr *tar.Header) (err error) {
+	var uid, gid int
+	if chownOpts != nil {
+		uid, gid = chownOpts.UID, chownOpts.GID
+	} else {
+		if readIDMappings != nil && !readIDMappings.Empty() {
+			uid, gid, err = readIDMappings.ToContainer(idtools.IDPair{UID: hdr.Uid, GID: hdr.Gid})
+			if err != nil {
+				return err
+			}
+		} else if runtime.GOOS == darwin {
+			uid, gid = hdr.Uid, hdr.Gid
+			if xstat, ok := hdr.Xattrs[idtools.ContainersOverrideXattr]; ok {
+				attrs := strings.Split(string(xstat), ":")
+				if len(attrs) == 3 {
+					val, err := strconv.ParseUint(attrs[0], 10, 32)
+					if err != nil {
+						uid = int(val)
+					}
+					val, err = strconv.ParseUint(attrs[1], 10, 32)
+					if err != nil {
+						gid = int(val)
+					}
+				}
+			}
 		} else {
-			pipeW.Close()
+			uid, gid = hdr.Uid, hdr.Gid
 		}
-		close(chdone)
-	}()
-
-	return pipeR, chdone, nil
+	}
+	ids := idtools.IDPair{UID: uid, GID: gid}
+	if writeIDMappings != nil && !writeIDMappings.Empty() {
+		ids, err = writeIDMappings.ToHost(ids)
+		if err != nil {
+			return err
+		}
+	}
+	hdr.Uid, hdr.Gid = ids.UID, ids.GID
+	return nil
 }
 
 // NewTempArchive reads the content of src into a temporary file, and returns the contents
 // of that file as an archive. The archive can only be read once - as soon as reading completes,
 // the file will be deleted.
 func NewTempArchive(src io.Reader, dir string) (*TempArchive, error) {
-	f, err := ioutil.TempFile(dir, "")
+	f, err := os.CreateTemp(dir, "")
 	if err != nil {
 		return nil, err
 	}
@@ -1234,7 +1385,7 @@ func IsArchive(header []byte) bool {
 	if compression != Uncompressed {
 		return true
 	}
-	r := tar.NewReader(bytes.NewBuffer(header))
+	r := tar.NewReader(bytes.NewReader(header))
 	_, err := r.Next()
 	return err == nil
 }
@@ -1249,3 +1400,119 @@ const (
 	// HeaderSize is the size in bytes of a tar header
 	HeaderSize = 512
 )
+
+// NewArchiver returns a new Archiver
+func NewArchiver(idMappings *idtools.IDMappings) *Archiver {
+	if idMappings == nil {
+		idMappings = &idtools.IDMappings{}
+	}
+	return &Archiver{Untar: Untar, TarIDMappings: idMappings, UntarIDMappings: idMappings}
+}
+
+// NewArchiverWithChown returns a new Archiver which uses Untar and the provided ID mapping configuration on both ends
+func NewArchiverWithChown(tarIDMappings *idtools.IDMappings, chownOpts *idtools.IDPair, untarIDMappings *idtools.IDMappings) *Archiver {
+	if tarIDMappings == nil {
+		tarIDMappings = &idtools.IDMappings{}
+	}
+	if untarIDMappings == nil {
+		untarIDMappings = &idtools.IDMappings{}
+	}
+	return &Archiver{Untar: Untar, TarIDMappings: tarIDMappings, ChownOpts: chownOpts, UntarIDMappings: untarIDMappings}
+}
+
+// CopyFileWithTarAndChown returns a function which copies a single file from outside
+// of any container into our working container, mapping permissions using the
+// container's ID maps, possibly overridden using the passed-in chownOpts
+func CopyFileWithTarAndChown(chownOpts *idtools.IDPair, hasher io.Writer, uidmap []idtools.IDMap, gidmap []idtools.IDMap) func(src, dest string) error {
+	untarMappings := idtools.NewIDMappingsFromMaps(uidmap, gidmap)
+	archiver := NewArchiverWithChown(nil, chownOpts, untarMappings)
+	if hasher != nil {
+		originalUntar := archiver.Untar
+		archiver.Untar = func(tarArchive io.Reader, dest string, options *TarOptions) error {
+			contentReader, contentWriter, err := os.Pipe()
+			if err != nil {
+				return fmt.Errorf("creating pipe extract data to %q: %w", dest, err)
+			}
+			defer contentReader.Close()
+			defer contentWriter.Close()
+			var hashError error
+			var hashWorker sync.WaitGroup
+			hashWorker.Add(1)
+			go func() {
+				t := tar.NewReader(contentReader)
+				_, err := t.Next()
+				if err != nil {
+					hashError = err
+				}
+				if _, err = io.Copy(hasher, t); err != nil && err != io.EOF {
+					hashError = err
+				}
+				hashWorker.Done()
+			}()
+			if err = originalUntar(io.TeeReader(tarArchive, contentWriter), dest, options); err != nil {
+				err = fmt.Errorf("extracting data to %q while copying: %w", dest, err)
+			}
+			hashWorker.Wait()
+			if err == nil && hashError != nil {
+				err = fmt.Errorf("calculating digest of data for %q while copying: %w", dest, hashError)
+			}
+			return err
+		}
+	}
+	return archiver.CopyFileWithTar
+}
+
+// CopyWithTarAndChown returns a function which copies a directory tree from outside of
+// any container into our working container, mapping permissions using the
+// container's ID maps, possibly overridden using the passed-in chownOpts
+func CopyWithTarAndChown(chownOpts *idtools.IDPair, hasher io.Writer, uidmap []idtools.IDMap, gidmap []idtools.IDMap) func(src, dest string) error {
+	untarMappings := idtools.NewIDMappingsFromMaps(uidmap, gidmap)
+	archiver := NewArchiverWithChown(nil, chownOpts, untarMappings)
+	if hasher != nil {
+		originalUntar := archiver.Untar
+		archiver.Untar = func(tarArchive io.Reader, dest string, options *TarOptions) error {
+			return originalUntar(io.TeeReader(tarArchive, hasher), dest, options)
+		}
+	}
+	return archiver.CopyWithTar
+}
+
+// UntarPathAndChown returns a function which extracts an archive in a specified
+// location into our working container, mapping permissions using the
+// container's ID maps, possibly overridden using the passed-in chownOpts
+func UntarPathAndChown(chownOpts *idtools.IDPair, hasher io.Writer, uidmap []idtools.IDMap, gidmap []idtools.IDMap) func(src, dest string) error {
+	untarMappings := idtools.NewIDMappingsFromMaps(uidmap, gidmap)
+	archiver := NewArchiverWithChown(nil, chownOpts, untarMappings)
+	if hasher != nil {
+		originalUntar := archiver.Untar
+		archiver.Untar = func(tarArchive io.Reader, dest string, options *TarOptions) error {
+			return originalUntar(io.TeeReader(tarArchive, hasher), dest, options)
+		}
+	}
+	return archiver.UntarPath
+}
+
+// TarPath returns a function which creates an archive of a specified
+// location in the container's filesystem, mapping permissions using the
+// container's ID maps
+func TarPath(uidmap []idtools.IDMap, gidmap []idtools.IDMap) func(path string) (io.ReadCloser, error) {
+	tarMappings := idtools.NewIDMappingsFromMaps(uidmap, gidmap)
+	return func(path string) (io.ReadCloser, error) {
+		return TarWithOptions(path, &TarOptions{
+			Compression: Uncompressed,
+			UIDMaps:     tarMappings.UIDs(),
+			GIDMaps:     tarMappings.GIDs(),
+		})
+	}
+}
+
+// GetOverlayXattrName returns the xattr used by the overlay driver with the
+// given name.
+// It uses the trusted.overlay prefix when running as root, and user.overlay
+// in rootless mode.
+func GetOverlayXattrName(name string) string {
+	if unshare.IsRootless() {
+		return fmt.Sprintf("user.overlay.%s", name)
+	}
+	return fmt.Sprintf("trusted.overlay.%s", name)
+}

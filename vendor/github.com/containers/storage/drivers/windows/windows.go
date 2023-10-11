@@ -1,15 +1,15 @@
-//+build windows
+//go:build windows
+// +build windows
 
 package windows
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -21,11 +21,11 @@ import (
 	"unsafe"
 
 	"github.com/Microsoft/go-winio"
-	"github.com/Microsoft/go-winio/archive/tar"
 	"github.com/Microsoft/go-winio/backuptar"
 	"github.com/Microsoft/hcsshim"
-	"github.com/containers/storage/drivers"
+	graphdriver "github.com/containers/storage/drivers"
 	"github.com/containers/storage/pkg/archive"
+	"github.com/containers/storage/pkg/directory"
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/ioutils"
 	"github.com/containers/storage/pkg/longpath"
@@ -53,7 +53,7 @@ var (
 
 // init registers the windows graph drivers to the register.
 func init() {
-	graphdriver.Register("windowsfilter", InitFilter)
+	graphdriver.MustRegister("windowsfilter", InitFilter)
 	// DOCKER_WINDOWSFILTER_NOREEXEC allows for inline processing which makes
 	// debugging issues in the re-exec codepath significantly easier.
 	if os.Getenv("DOCKER_WINDOWSFILTER_NOREEXEC") != "" {
@@ -64,8 +64,7 @@ func init() {
 	}
 }
 
-type checker struct {
-}
+type checker struct{}
 
 func (c *checker) IsMounted(path string) bool {
 	return false
@@ -83,8 +82,16 @@ type Driver struct {
 }
 
 // InitFilter returns a new Windows storage filter driver.
-func InitFilter(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (graphdriver.Driver, error) {
+func InitFilter(home string, options graphdriver.Options) (graphdriver.Driver, error) {
 	logrus.Debugf("WindowsGraphDriver InitFilter at %s", home)
+
+	for _, option := range options.DriverOptions {
+		if strings.HasPrefix(option, "windows.mountopt=") {
+			return nil, fmt.Errorf("windows driver does not support mount options")
+		} else {
+			return nil, fmt.Errorf("option %s not supported", option)
+		}
+	}
 
 	fsType, err := getFileSystemType(string(home[0]))
 	if err != nil {
@@ -94,8 +101,8 @@ func InitFilter(home string, options []string, uidMaps, gidMaps []idtools.IDMap)
 		return nil, fmt.Errorf("%s is on an ReFS volume - ReFS volumes are not supported", home)
 	}
 
-	if err := idtools.MkdirAllAs(home, 0700, 0, 0); err != nil {
-		return nil, fmt.Errorf("windowsfilter failed to create '%s': %v", home, err)
+	if err := idtools.MkdirAllAs(home, 0o700, 0, 0); err != nil {
+		return nil, fmt.Errorf("windowsfilter failed to create '%s': %w", home, err)
 	}
 
 	d := &Driver{
@@ -177,6 +184,16 @@ func (d *Driver) Exists(id string) bool {
 	return result
 }
 
+// List layers (not including additional image stores)
+func (d *Driver) ListLayers() ([]string, error) {
+	return nil, graphdriver.ErrNotSupported
+}
+
+// CreateFromTemplate creates a layer with the same contents and parent as another layer.
+func (d *Driver) CreateFromTemplate(id, template string, templateIDMappings *idtools.IDMappings, parent string, parentIDMappings *idtools.IDMappings, opts *graphdriver.CreateOpts, readWrite bool) error {
+	return graphdriver.NaiveCreateFromTemplate(d, id, template, templateIDMappings, parent, parentIDMappings, opts, readWrite)
+}
+
 // CreateReadWrite creates a layer that is writable for use as a container
 // file system.
 func (d *Driver) CreateReadWrite(id, parent string, opts *graphdriver.CreateOpts) error {
@@ -239,7 +256,7 @@ func (d *Driver) create(id, parent, mountLabel string, readOnly bool, storageOpt
 
 		storageOptions, err := parseStorageOpt(storageOpt)
 		if err != nil {
-			return fmt.Errorf("Failed to parse storage options - %s", err)
+			return fmt.Errorf("failed to parse storage options - %s", err)
 		}
 
 		if storageOptions.size != 0 {
@@ -253,7 +270,7 @@ func (d *Driver) create(id, parent, mountLabel string, readOnly bool, storageOpt
 		if err2 := hcsshim.DestroyLayer(d.info, id); err2 != nil {
 			logrus.Warnf("Failed to DestroyLayer %s: %s", id, err2)
 		}
-		return fmt.Errorf("Cannot create layer with missing parent %s: %s", parent, err)
+		return fmt.Errorf("cannot create layer with missing parent %s: %s", parent, err)
 	}
 
 	if err := d.setLayerChain(id, layerChain); err != nil {
@@ -354,11 +371,22 @@ func (d *Driver) Remove(id string) error {
 }
 
 // Get returns the rootfs path for the id. This will mount the dir at its given path.
-func (d *Driver) Get(id, mountLabel string) (string, error) {
+func (d *Driver) Get(id string, options graphdriver.MountOpts) (string, error) {
 	panicIfUsedByLcow()
-	logrus.Debugf("WindowsGraphDriver Get() id %s mountLabel %s", id, mountLabel)
+	logrus.Debugf("WindowsGraphDriver Get() id %s mountLabel %s", id, options.MountLabel)
 	var dir string
 
+	switch len(options.Options) {
+	case 0:
+	case 1:
+		if options.Options[0] == "ro" {
+			// ignore "ro" option
+			break
+		}
+		fallthrough
+	default:
+		return "", fmt.Errorf("windows driver does not support mount options")
+	}
 	rID, err := d.resolveID(id)
 	if err != nil {
 		return "", err
@@ -412,6 +440,12 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 	return dir, nil
 }
 
+// ReadWriteDiskUsage returns the disk usage of the writable directory for the ID.
+// For VFS, it queries the directory for this ID.
+func (d *Driver) ReadWriteDiskUsage(id string) (*directory.DiskUsage, error) {
+	return directory.Usage(d.dir(id))
+}
+
 // Put adds a new layer to the driver.
 func (d *Driver) Put(id string) error {
 	panicIfUsedByLcow()
@@ -444,7 +478,7 @@ func (d *Driver) Put(id string) error {
 // We use this opportunity to cleanup any -removing folders which may be
 // still left if the daemon was killed while it was removing a layer.
 func (d *Driver) Cleanup() error {
-	items, err := ioutil.ReadDir(d.info.HomeDir)
+	items, err := os.ReadDir(d.info.HomeDir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -472,7 +506,7 @@ func (d *Driver) Cleanup() error {
 // Diff produces an archive of the changes between the specified
 // layer and its parent layer which may be "".
 // The layer should be mounted when calling this function
-func (d *Driver) Diff(id, parent, mountLabel string) (_ io.ReadCloser, err error) {
+func (d *Driver) Diff(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (_ io.ReadCloser, err error) {
 	panicIfUsedByLcow()
 	rID, err := d.resolveID(id)
 	if err != nil {
@@ -509,7 +543,7 @@ func (d *Driver) Diff(id, parent, mountLabel string) (_ io.ReadCloser, err error
 // Changes produces a list of changes between the specified layer
 // and its parent layer. If parent is "", then all changes will be ADD changes.
 // The layer should not be mounted when calling this function.
-func (d *Driver) Changes(id, parent, mountLabel string) ([]archive.Change, error) {
+func (d *Driver) Changes(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) ([]archive.Change, error) {
 	panicIfUsedByLcow()
 	rID, err := d.resolveID(id)
 	if err != nil {
@@ -565,7 +599,7 @@ func (d *Driver) Changes(id, parent, mountLabel string) ([]archive.Change, error
 // layer with the specified id and parent, returning the size of the
 // new layer in bytes.
 // The layer should not be mounted when calling this function
-func (d *Driver) ApplyDiff(id, parent, mountLabel string, diff io.Reader) (int64, error) {
+func (d *Driver) ApplyDiff(id, parent string, options graphdriver.ApplyDiffOpts) (int64, error) {
 	panicIfUsedByLcow()
 	var layerChain []string
 	if parent != "" {
@@ -585,7 +619,7 @@ func (d *Driver) ApplyDiff(id, parent, mountLabel string, diff io.Reader) (int64
 		layerChain = append(layerChain, parentChain...)
 	}
 
-	size, err := d.importLayer(id, diff, layerChain)
+	size, err := d.importLayer(id, options.Diff, layerChain)
 	if err != nil {
 		return 0, err
 	}
@@ -600,19 +634,19 @@ func (d *Driver) ApplyDiff(id, parent, mountLabel string, diff io.Reader) (int64
 // DiffSize calculates the changes between the specified layer
 // and its parent and returns the size in bytes of the changes
 // relative to its base filesystem directory.
-func (d *Driver) DiffSize(id, parent, mountLabel string) (size int64, err error) {
+func (d *Driver) DiffSize(id string, idMappings *idtools.IDMappings, parent string, parentMappings *idtools.IDMappings, mountLabel string) (size int64, err error) {
 	panicIfUsedByLcow()
 	rPId, err := d.resolveID(parent)
 	if err != nil {
 		return
 	}
 
-	changes, err := d.Changes(id, rPId, mountLabel)
+	changes, err := d.Changes(id, idMappings, rPId, parentMappings, mountLabel)
 	if err != nil {
 		return
 	}
 
-	layerFs, err := d.Get(id, "")
+	layerFs, err := d.Get(id, graphdriver.MountOpts{})
 	if err != nil {
 		return
 	}
@@ -780,7 +814,7 @@ func (d *Driver) importLayer(id string, layerData io.Reader, parentLayerPaths []
 		}
 
 		if err = cmd.Wait(); err != nil {
-			return 0, fmt.Errorf("re-exec error: %v: output: %s", err, output)
+			return 0, fmt.Errorf("re-exec output: %s: error: %w", output, err)
 		}
 
 		return strconv.ParseInt(output.String(), 10, 64)
@@ -839,7 +873,7 @@ func writeLayer(layerData io.Reader, home string, id string, parentLayerPaths ..
 
 // resolveID computes the layerID information based on the given id.
 func (d *Driver) resolveID(id string) (string, error) {
-	content, err := ioutil.ReadFile(filepath.Join(d.dir(id), "layerID"))
+	content, err := os.ReadFile(filepath.Join(d.dir(id), "layerID"))
 	if os.IsNotExist(err) {
 		return id, nil
 	} else if err != nil {
@@ -850,23 +884,23 @@ func (d *Driver) resolveID(id string) (string, error) {
 
 // setID stores the layerId in disk.
 func (d *Driver) setID(id, altID string) error {
-	return ioutil.WriteFile(filepath.Join(d.dir(id), "layerId"), []byte(altID), 0600)
+	return os.WriteFile(filepath.Join(d.dir(id), "layerId"), []byte(altID), 0o600)
 }
 
 // getLayerChain returns the layer chain information.
 func (d *Driver) getLayerChain(id string) ([]string, error) {
 	jPath := filepath.Join(d.dir(id), "layerchain.json")
-	content, err := ioutil.ReadFile(jPath)
+	content, err := os.ReadFile(jPath)
 	if os.IsNotExist(err) {
 		return nil, nil
 	} else if err != nil {
-		return nil, fmt.Errorf("Unable to read layerchain file - %s", err)
+		return nil, fmt.Errorf("unable to read layerchain file - %s", err)
 	}
 
 	var layerChain []string
 	err = json.Unmarshal(content, &layerChain)
 	if err != nil {
-		return nil, fmt.Errorf("Failed to unmarshall layerchain json - %s", err)
+		return nil, fmt.Errorf("failed to unmarshall layerchain json - %s", err)
 	}
 
 	return layerChain, nil
@@ -876,13 +910,13 @@ func (d *Driver) getLayerChain(id string) ([]string, error) {
 func (d *Driver) setLayerChain(id string, chain []string) error {
 	content, err := json.Marshal(&chain)
 	if err != nil {
-		return fmt.Errorf("Failed to marshall layerchain json - %s", err)
+		return fmt.Errorf("failed to marshall layerchain json - %s", err)
 	}
 
 	jPath := filepath.Join(d.dir(id), "layerchain.json")
-	err = ioutil.WriteFile(jPath, content, 0600)
+	err = os.WriteFile(jPath, content, 0o600)
 	if err != nil {
-		return fmt.Errorf("Unable to write layerchain file - %s", err)
+		return fmt.Errorf("unable to write layerchain file - %s", err)
 	}
 
 	return nil
@@ -940,6 +974,17 @@ func (d *Driver) AdditionalImageStores() []string {
 	return nil
 }
 
+// UpdateLayerIDMap changes ownerships in the layer's filesystem tree from
+// matching those in toContainer to matching those in toHost.
+func (d *Driver) UpdateLayerIDMap(id string, toContainer, toHost *idtools.IDMappings, mountLabel string) error {
+	return fmt.Errorf("windows doesn't support changing ID mappings")
+}
+
+// SupportsShifting tells whether the driver support shifting of the UIDs/GIDs in an userNS
+func (d *Driver) SupportsShifting() bool {
+	return false
+}
+
 type storageOptions struct {
 	size uint64
 }
@@ -958,7 +1003,7 @@ func parseStorageOpt(storageOpt map[string]string) (*storageOptions, error) {
 			}
 			options.size = uint64(size)
 		default:
-			return nil, fmt.Errorf("Unknown storage option: %s", key)
+			return nil, fmt.Errorf("unknown storage option: %s", key)
 		}
 	}
 	return &options, nil

@@ -1,9 +1,14 @@
+//go:build !windows
 // +build !windows
 
 package system
 
 import (
+	"os"
+	"strconv"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // StatT type contains status of a file. It contains metadata
@@ -15,6 +20,8 @@ type StatT struct {
 	rdev uint64
 	size int64
 	mtim syscall.Timespec
+	dev  uint64
+	platformStatT
 }
 
 // Mode returns file's permission mode.
@@ -47,6 +54,15 @@ func (s StatT) Mtim() syscall.Timespec {
 	return s.mtim
 }
 
+// Dev returns a unique identifier for owning filesystem
+func (s StatT) Dev() uint64 {
+	return s.dev
+}
+
+func (s StatT) IsDir() bool {
+	return (s.mode & unix.S_IFDIR) != 0
+}
+
 // Stat takes a path to a file and returns
 // a system.StatT type pertaining to that file.
 //
@@ -54,7 +70,19 @@ func (s StatT) Mtim() syscall.Timespec {
 func Stat(path string) (*StatT, error) {
 	s := &syscall.Stat_t{}
 	if err := syscall.Stat(path, s); err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "Stat", Path: path, Err: err}
+	}
+	return fromStatT(s)
+}
+
+// Fstat takes an open file descriptor and returns
+// a system.StatT type pertaining to that file.
+//
+// Throws an error if the file descriptor is invalid
+func Fstat(fd int) (*StatT, error) {
+	s := &syscall.Stat_t{}
+	if err := syscall.Fstat(fd, s); err != nil {
+		return nil, &os.PathError{Op: "Fstat", Path: strconv.Itoa(fd), Err: err}
 	}
 	return fromStatT(s)
 }
