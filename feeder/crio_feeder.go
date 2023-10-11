@@ -25,8 +25,10 @@ import (
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/containers/podman/v4/libpod"
 	"github.com/containers/storage/pkg/reexec"
+	"github.com/containers/storage/pkg/unshare"
 
 	log "github.com/sirupsen/logrus"
+	"github.com/syndtr/gocapability/capability"
 )
 
 // CRIOFeeder wraps the libpod.Runtime and implementes the Feeder interface.
@@ -35,12 +37,44 @@ type CRIOFeeder struct {
 	backgroundContext context.Context
 }
 
+// capabilities for running in a user namespace
+var neededCapabilities = []capability.Cap{
+	capability.CAP_CHOWN,
+	capability.CAP_DAC_OVERRIDE,
+	capability.CAP_FOWNER,
+	capability.CAP_FSETID,
+	capability.CAP_MKNOD,
+	capability.CAP_SETFCAP,
+}
+
+func reexecForRootlessStorage() error {
+	capabilities, err := capability.NewPid2(0)
+	if err != nil {
+		return err
+	}
+	err = capabilities.Load()
+	if err != nil {
+		return err
+	}
+	for _, cap := range neededCapabilities {
+		if !capabilities.Get(capability.EFFECTIVE, cap) {
+			// We miss a capability we need, create a user namespaces
+			unshare.MaybeReexecUsingUserNamespace(true)
+		}
+	}
+	return nil
+}
+
 // NewCRIOFeeder returns a pointer to an initialized CRIOFeeder.
 func NewCRIOFeeder() (*CRIOFeeder, error) {
 	feeder := &CRIOFeeder{backgroundContext: context.Background()}
 
 	if reexec.Init() {
 		return nil, fmt.Errorf("could not init CRIOFeeder")
+	}
+
+	if err := reexecForRootlessStorage(); err != nil {
+		return nil, err
 	}
 
 	runtime, err := libpod.NewRuntime(feeder.backgroundContext)
